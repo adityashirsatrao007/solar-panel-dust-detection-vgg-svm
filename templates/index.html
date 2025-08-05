@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SolarClean AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/apexcharts@latest/dist/apexcharts.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <script>
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+    </script>
+</head>
+<body>
+    <div class="particle-bg"></div>
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <div class="title-box">
+                <h1 class="title">Smart Solar Clean 🚀</h1>
+            </div>
+            <p class="subtitle">Advanced Solar Panel Dust Prediction System 🌞</p>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle between light and dark theme">
+                <i class="fas fa-sun"></i>
+            </button>
+        </div>
+
+        <div class="upload-section">
+            <form id="uploadForm" enctype="multipart/form-data">
+                <div class="upload-box" id="dropArea" role="button" aria-label="Upload or drag and drop an image">
+                    <i class="fas fa-cloud-upload-alt fa-3x mb-3"></i>
+                    <h3>Drag & Drop or Click to Upload 📸</h3>
+                    <p>Supported formats: PNG, JPG, JPEG</p>
+                    <input type="file" id="fileInput" name="file" accept=".png,.jpg,.jpeg" style="display: none;">
+                </div>
+                <button type="submit" class="btn" id="analyzeBtn" data-tooltip="Start analyzing the uploaded image">
+                    <i class="fas fa-rocket mr-2"></i> Analyze Now
+                </button>
+            </form>
+
+            <div class="alert error" id="errorAlert" role="alert" aria-live="polite" style="display: none;"></div>
+            <div class="alert success" id="successAlert" role="alert" aria-live="polite" style="display: none;"></div>
+
+            <div class="result-card" id="resultCard">
+                <div class="loading-overlay" id="loadingOverlay">
+                    <div class="pyramid-loader"></div>
+                    <p class="loading-tip" id="loadingTip"></p>
+                </div>
+                
+                <h2>Analysis Result 📊</h2>
+                <div class="result-grid">
+                    <div class="image-preview" id="imagePreview" role="region" aria-label="Zoomable image preview" tabindex="0">
+                        <img class="preview-image" id="previewImage" src="" alt="Analyzed Panel">
+                    </div>
+                    <div class="chart-container" id="gaugeChart" data-tooltip="Dustiness percentage"></div>
+                </div>
+                
+                <div class="result-grid">
+                    <div class="chart-container" id="powerChart" data-tooltip="Power potential after dust analysis"></div>
+                    <div class="chart-container" id="trendChart" data-tooltip="Historical dust and power trends"></div>
+                </div>
+                
+                <div class="result-grid">
+                    <div class="chart-container" id="dustinessChart" data-tooltip="Distribution of clean vs. dusty panels"></div>
+                    <div class="chart-container" id="dustCategoryChart" data-tooltip="Dust level categories"></div>
+                </div>
+                
+                <div id="recommendation">
+                    <h3>Maintenance Recommendation 🛠️</h3>
+                    <p id="recommendationText"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button class="reset-btn" id="resetHistory" onclick="resetHistory()" aria-label="Reset analysis history">
+        <i class="fas fa-history mr-2"></i> Reset History
+    </button>
+
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <script>
+        let analysisHistory = JSON.parse(localStorage.getItem('analysisHistory')) || [];
+        let gaugeChart, trendChart, powerChart, dustinessChart, dustCategoryChart;
+        const MAX_HISTORY = 100;
+
+        // Validate and clean history on load
+        analysisHistory = analysisHistory.filter(entry => 
+            entry.value !== undefined && entry.power !== undefined && entry.timestamp
+        );
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const rootStyles = getComputedStyle(document.documentElement);
+            const primaryColor = rootStyles.getPropertyValue('--primary').trim();
+            const secondaryColor = rootStyles.getPropertyValue('--secondary').trim();
+
+            // Initialize theme
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            document.querySelector('.theme-toggle i').className = savedTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+
+            // Drag and drop setup
+            const dropArea = document.getElementById('dropArea');
+            const fileInput = document.getElementById('fileInput');
+            
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, preventDefaults, false);
+            });
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropArea.addEventListener(eventName, highlight, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, unhighlight, false);
+            });
+
+            dropArea.addEventListener('drop', handleDrop, false);
+            dropArea.addEventListener('click', () => fileInput.click());
+            dropArea.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    fileInput.click();
+                }
+            });
+            dropArea.setAttribute('tabindex', '0');
+
+            // Image preview zoom
+            const imagePreview = document.getElementById('imagePreview');
+            let scale = 1;
+            imagePreview.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                scale += e.deltaY * -0.01;
+                scale = Math.min(Math.max(1, scale), 3);
+                document.getElementById('previewImage').style.transform = `scale(${scale})`;
+            });
+            imagePreview.addEventListener('keydown', (e) => {
+                if (e.key === '+') {
+                    scale = Math.min(scale + 0.1, 3);
+                    document.getElementById('previewImage').style.transform = `scale(${scale})`;
+                } else if (e.key === '-') {
+                    scale = Math.max(scale - 0.1, 1);
+                    document.getElementById('previewImage').style.transform = `scale(${scale})`;
+                }
+            });
+
+            // Loading tips
+            const tips = [
+                'Regular cleaning can boost solar efficiency by up to 20%! 🌞',
+                'Use automated brushes for safe and effective dust removal. 🧹',
+                'Check panels monthly for optimal performance. 🔍',
+                'Hire professionals for heavy dust buildup. 💪'
+            ];
+            function showRandomTip() {
+                const tipElement = document.getElementById('loadingTip');
+                tipElement.textContent = tips[Math.floor(Math.random() * tips.length)];
+            }
+
+            // Client-side file validation
+            fileInput.addEventListener('change', () => {
+                const file = fileInput.files[0];
+                if (file && file.size > 8 * 1024 * 1024) {
+                    showError('File size must be less than 8MB 📏');
+                    fileInput.value = '';
+                }
+            });
+
+            // Initialize charts if history exists
+            if (analysisHistory.length > 0) {
+                updateCharts(analysisHistory[analysisHistory.length - 1].value, primaryColor, secondaryColor);
+            }
+
+            // Form submission
+            document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const file = fileInput.files[0];
+                if (!file) return showError('Please select an image first 🚫');
+                const validTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+                if (!validTypes.includes(file.type)) {
+                    return showError('Only PNG, JPG, or JPEG files are allowed 📁');
+                }
+
+                const analyzeBtn = document.getElementById('analyzeBtn');
+                const progressBar = document.getElementById('progressBar');
+                const progressContainer = document.getElementById('progressContainer');
+                const loadingOverlay = document.getElementById('loadingOverlay');
+
+                loadingOverlay.style.display = 'flex';
+                showRandomTip();
+                document.getElementById('resultCard').style.display = 'block';
+                analyzeBtn.disabled = true;
+                analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Analyzing...';
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    const previewImage = document.getElementById('previewImage');
+                    previewImage.src = URL.createObjectURL(file);
+
+                    progressContainer.style.display = 'block';
+                    let progress = 0;
+                    const progressInterval = setInterval(() => {
+                        progress += Math.random() * 15;
+                        progressBar.style.width = `${Math.min(progress, 95)}%`;
+                    }, 200);
+
+                    const response = await fetch('/analyze', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    clearInterval(progressInterval);
+                    const data = await response.json();
+                    
+                    if (!response.ok) throw new Error(data.error || 'Analysis failed');
+                    
+                    progressBar.style.width = '100%';
+                    setTimeout(() => {
+                        progressBar.style.width = '0%';
+                        progressContainer.style.display = 'none';
+                    }, 500);
+
+                    const timestamp = new Date().getTime();
+                    const newEntry = {
+                        value: data.dustiness,
+                        timestamp: timestamp,
+                        date: new Date(timestamp).toLocaleString(),
+                        power: 100 - data.dustiness
+                    };
+                    analysisHistory.push(newEntry);
+
+                    if (analysisHistory.length > MAX_HISTORY) {
+                        analysisHistory = analysisHistory.slice(-MAX_HISTORY);
+                    }
+                    localStorage.setItem('analysisHistory', JSON.stringify(analysisHistory));
+
+                    updateCharts(data.dustiness, primaryColor, secondaryColor);
+                    showRecommendation(data.dustiness);
+                    showSuccess('Analysis completed successfully! 🎉');
+
+                } catch (error) {
+                    showError(error.message || 'Failed to analyze image. Please try again.');
+                } finally {
+                    loadingOverlay.style.display = 'none';
+                    analyzeBtn.disabled = false;
+                    analyzeBtn.innerHTML = '<i class="fas fa-rocket mr-2"></i> Analyze Now';
+                }
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            function highlight() {
+                dropArea.style.borderColor = primaryColor;
+                dropArea.style.backgroundColor = 'rgba(0, 207, 200, 0.1)';
+            }
+
+            function unhighlight() {
+                dropArea.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+                dropArea.style.backgroundColor = 'transparent';
+            }
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files.length) fileInput.files = files;
+            }
+
+            function updateCharts(dustiness, primary, secondary) {
+                const textColor = rootStyles.getPropertyValue('--chart-text').trim();
+                const gridColor = rootStyles.getPropertyValue('--grid-color').trim();
+
+                const dustCategories = [
+                    { label: 'Very Clean', min: 0, max: 20 },
+                    { label: 'Clean', min: 20, max: 40 },
+                    { label: 'Moderately Dusty', min: 40, max: 60 },
+                    { label: 'Dusty', min: 60, max: 80 },
+                    { label: 'Very Dusty', min: 80, max: 100 }
+                ];
+
+                const categoryCounts = dustCategories.map(cat => {
+                    return analysisHistory.filter(entry => entry.value > cat.min && entry.value <= cat.max).length;
+                });
+
+                // Gauge Chart
+                if (!gaugeChart) {
+                    gaugeChart = new ApexCharts(document.querySelector("#gaugeChart"), {
+                        series: [dustiness],
+                        chart: {
+                            type: 'radialBar',
+                            height: 350,
+                            animations: { enabled: true, easing: 'easeinout', speed: 800 }
+                        },
+                        plotOptions: {
+                            radialBar: {
+                                startAngle: -135,
+                                endAngle: 135,
+                                hollow: { size: '70%' },
+                                track: { background: '#2d2d39' },
+                                dataLabels: {
+                                    name: { show: false },
+                                    value: {
+                                        offsetY: 0,
+                                        fontSize: '22px',
+                                        color: textColor,
+                                        formatter: (val) => `${Math.round(val)}%`
+                                    }
+                                }
+                            }
+                        },
+                        fill: {
+                            type: 'gradient',
+                            gradient: {
+                                shade: 'dark',
+                                type: 'horizontal',
+                                gradientToColors: [primary],
+                                stops: [0, 100]
+                            }
+                        },
+                        colors: [primary],
+                        stroke: { lineCap: 'round' },
+                        tooltip: {
+                            enabled: true,
+                            y: { formatter: (val) => `${val}% Dustiness` },
+                            style: { fontSize: '14px', color: '#000' }
+                        }
+                    });
+                    gaugeChart.render();
+                } else {
+                    gaugeChart.updateSeries([dustiness]);
+                }
+
+                // Power Chart
+                if (!powerChart) {
+                    powerChart = new ApexCharts(document.querySelector("#powerChart"), {
+                        series: [{ name: 'Power Potential', data: [100 - dustiness] }],
+                        chart: {
+                            type: 'bar',
+                            height: 350,
+                            background: 'transparent',
+                            animations: { enabled: true }
+                        },
+                        plotOptions: { bar: { borderRadius: 4, columnWidth: '60%' } },
+                        colors: [secondary],
+                        xaxis: {
+                            categories: ['Current Analysis'],
+                            labels: { style: { colors: textColor } }
+                        },
+                        yaxis: {
+                            max: 100,
+                            labels: {
+                                style: { colors: textColor },
+                                formatter: (val) => Math.round(val)
+                            },
+                            title: { text: 'Percentage (%)', style: { color: textColor } }
+                        },
+                        grid: { borderColor: gridColor },
+                        dataLabels: { enabled: false },
+                        tooltip: {
+                            enabled: true,
+                            y: { formatter: (val) => `${val}% Power Potential` },
+                            style: { fontSize: '14px', color: '#000' }
+                        }
+                    });
+                    powerChart.render();
+                } else {
+                    powerChart.updateSeries([{ data: [100 - dustiness] }]);
+                }
+
+                // Trend Chart
+                if (!trendChart) {
+                    trendChart = new ApexCharts(document.querySelector("#trendChart"), {
+                        series: [
+                            {
+                                name: 'Dust Level',
+                                data: analysisHistory.map(entry => ({
+                                    x: entry.timestamp,
+                                    y: entry.value
+                                }))
+                            },
+                            {
+                                name: 'Power Potential',
+                                data: analysisHistory.map(entry => ({
+                                    x: entry.timestamp,
+                                    y: entry.power
+                                }))
+                            }
+                        ],
+                        chart: {
+                            type: 'line',
+                            height: 350,
+                            background: 'transparent',
+                            animations: { enabled: true },
+                            toolbar: {
+                                show: true,
+                                tools: {
+                                    zoom: true,
+                                    zoomin: true,
+                                    zoomout: true,
+                                    pan: true,
+                                    reset: true
+                                }
+                            },
+                            zoom: {
+                                enabled: true,
+                                type: 'x',
+                                autoScaleYaxis: true
+                            }
+                        },
+                        colors: [primary, secondary],
+                        xaxis: {
+                            type: 'datetime',
+                            labels: {
+                                style: { colors: textColor },
+                                datetimeFormatter: {
+                                    year: 'yyyy',
+                                    month: "MMM 'yy",
+                                    day: 'dd MMM',
+                                    hour: 'HH:mm'
+                                },
+                                rotate: -45
+                            },
+                            title: { text: 'Analysis Time', style: { color: textColor } }
+                        },
+                        yaxis: {
+                            min: 0,
+                            max: 100,
+                            tickAmount: 5,
+                            labels: {
+                                style: { colors: textColor },
+                                formatter: (val) => Math.round(val)
+                            },
+                            title: { text: 'Percentage (%)', style: { color: textColor } }
+                        },
+                        grid: { borderColor: gridColor },
+                        stroke: { width: 3, curve: 'smooth' },
+                        markers: { size: 4 },
+                        tooltip: {
+                            enabled: true,
+                            x: { format: 'dd MMM yyyy HH:mm' },
+                            y: { formatter: (val) => `${val}%` },
+                            style: { fontSize: '14px', color: '#000' }
+                        },
+                        noData: {
+                            text: 'No data available. Upload an image to start analysis.',
+                            align: 'center',
+                            verticalAlign: 'middle',
+                            style: { color: textColor, fontSize: '14px' }
+                        }
+                    });
+                    trendChart.render();
+                } else {
+                    trendChart.updateSeries([
+                        {
+                            name: 'Dust Level',
+                            data: analysisHistory.map(entry => ({
+                                x: entry.timestamp,
+                                y: entry.value
+                            }))
+                        },
+                        {
+                            name: 'Power Potential',
+                            data: analysisHistory.map(entry => ({
+                                x: entry.timestamp,
+                                y: entry.power
+                            }))
+                        }
+                    ]);
+                }
+
+                // Dustiness Chart
+                if (!dustinessChart) {
+                    dustinessChart = new ApexCharts(document.querySelector("#dustinessChart"), {
+                        series: [100 - dustiness, dustiness],
+                        chart: {
+                            type: 'donut',
+                            height: 350,
+                            animations: { enabled: true }
+                        },
+                        labels: ['Clean', 'Dusty'],
+                        colors: [primary, secondary],
+                        dataLabels: { style: { colors: [textColor] } },
+                        legend: { labels: { colors: textColor } },
+                        tooltip: {
+                            enabled: true,
+                            y: { formatter: (val) => `${val}%` },
+                            style: { fontSize: '14px', color: '#000' }
+                        }
+                    });
+                    dustinessChart.render();
+                } else {
+                    dustinessChart.updateSeries([100 - dustiness, dustiness]);
+                }
+
+                // Dust Category Chart
+                if (!dustCategoryChart) {
+                    dustCategoryChart = new ApexCharts(document.querySelector("#dustCategoryChart"), {
+                        series: [{ name: 'Dust Categories', data: categoryCounts }],
+                        chart: {
+                            type: 'bar',
+                            height: 350,
+                            background: 'transparent',
+                            animations: { enabled: true }
+                        },
+                        plotOptions: { bar: { borderRadius: 4, columnWidth: '60%' } },
+                        colors: ['#00e676', '#ffeb3b', '#ff9800', '#ff5722', '#d50000'],
+                        xaxis: {
+                            categories: dustCategories.map(cat => cat.label),
+                            labels: { style: { colors: textColor } }
+                        },
+                        yaxis: {
+                            labels: {
+                                style: { colors: textColor },
+                                formatter: (val) => Math.round(val)
+                            },
+                            title: { text: 'Count', style: { color: textColor } }
+                        },
+                        grid: { borderColor: gridColor },
+                        dataLabels: { enabled: false },
+                        tooltip: {
+                            enabled: true,
+                            y: { formatter: (val) => `${val} occurrences` },
+                            style: { fontSize: '14px', color: '#000' }
+                        }
+                    });
+                    dustCategoryChart.render();
+                } else {
+                    dustCategoryChart.updateSeries([{ data: categoryCounts }]);
+                }
+            }
+
+            function showRecommendation(value) {
+                let recommendation = '';
+                let cleaningMethod = '';
+                let warning = '';
+
+                if (value < 20) {
+                    recommendation = `🌟 Excellent condition! Your solar panels are clean and operating at peak efficiency.`;
+                    cleaningMethod = `Use a soft cloth and water to maintain cleanliness if needed. 🧼`;
+                } else if (value < 30) {
+                    recommendation = `✅ Good condition. Minimal dust detected.`;
+                    cleaningMethod = `Regular maintenance is sufficient. 🔧`;
+                } else if (value < 40) {
+                    recommendation = `⚠️ Moderate dust accumulation detected. Consider cleaning soon.`;
+                    cleaningMethod = `Use a gentle pressure wash or automated brushes. 🚿`;
+                    warning = `Dust level above 30%! Schedule a cleaning soon. 📅`;
+                } else {
+                    recommendation = `🚨 High dust level! Immediate cleaning recommended.`;
+                    cleaningMethod = `Hire professional services for heavy dust removal. 💪`;
+                    warning = `<span class="warning-highlight">🚨 Dust level above 40%! Automatic cleaner activated. 💦</span>`;
+                }
+
+                document.getElementById('recommendationText').innerHTML = `${recommendation} ${cleaningMethod} ${warning}`;
+            }
+
+            function showError(message) {
+                const errorAlert = document.getElementById('errorAlert');
+                errorAlert.textContent = message;
+                errorAlert.style.display = 'block';
+                setTimeout(() => errorAlert.style.display = 'none', 5000);
+            }
+
+            function showSuccess(message) {
+                const successAlert = document.getElementById('successAlert');
+                successAlert.textContent = message;
+                successAlert.style.display = 'block';
+                setTimeout(() => successAlert.style.display = 'none', 5000);
+            }
+
+            function toggleTheme() {
+                const html = document.documentElement;
+                const currentTheme = html.getAttribute('data-theme');
+                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                html.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+                document.querySelector('.theme-toggle i').className = newTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+            }
+
+            function resetHistory() {
+                const btn = document.getElementById('resetHistory');
+                btn.classList.add('processing');
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Resetting...';
+                
+                document.querySelectorAll('.chart-container').forEach(chart => {
+                    chart.style.transform = 'scale(0.95)';
+                    chart.style.opacity = '0.5';
+                });
+
+                setTimeout(() => {
+                    analysisHistory = [];
+                    localStorage.setItem('analysisHistory', JSON.stringify(analysisHistory));
+                    
+                    if (trendChart) {
+                        trendChart.updateSeries([
+                            { name: 'Dust Level', data: [] },
+                            { name: 'Power Potential', data: [] }
+                        ]);
+                    }
+                    if (gaugeChart) {
+                        gaugeChart.updateSeries([0]);
+                    }
+                    if (powerChart) {
+                        powerChart.updateSeries([{ data: [0] }]);
+                    }
+                    if (dustinessChart) {
+                        dustinessChart.updateSeries([100, 0]);
+                    }
+                    if (dustCategoryChart) {
+                        dustCategoryChart.updateSeries([{ data: [0, 0, 0, 0, 0] }]);
+                    }
+                    
+                    btn.classList.remove('processing');
+                    btn.innerHTML = '<i class="fas fa-history mr-2"></i> Reset History';
+                    document.querySelectorAll('.chart-container').forEach(chart => {
+                        chart.style.transform = 'scale(1)';
+                        chart.style.opacity = '1';
+                    });
+                    
+                    showSuccess('History reset successfully! 🗑️');
+                }, 1000);
+            }
+
+            const particleContainer = document.querySelector('.particle-bg');
+            for (let i = 0; i < 50; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.style.left = `${Math.random() * 100}%`;
+                particle.style.animationDelay = `${Math.random() * 5}s`;
+                particleContainer.appendChild(particle);
+            }
+        });
+    </script>
+</body>
+</html>

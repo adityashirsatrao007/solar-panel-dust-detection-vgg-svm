@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SolarClean AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/apexcharts@latest/dist/apexcharts.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <style>
+        :root {
+            --primary: #00cfc8;
+            --secondary: #0066ff;
+            --background: #0a192f;
+            --text: #f8f9fa;
+            --grid-color: rgba(255,255,255,0.1);
+            --card-background: linear-gradient(145deg, rgba(10, 25, 47, 0.8), rgba(10, 25, 47, 0.6));
+            --section-background: rgba(255, 255, 255, 0.05);
+        }
+
+        [data-theme="light"] {
+            --background: #ffffff;
+            --text: #333333;
+            --primary: #00a1a1;
+            --secondary: #0033cc;
+            --grid-color: rgba(0,0,0,0.1);
+            --card-background: linear-gradient(145deg, rgba(240, 240, 240, 0.8), rgba(240, 240, 240, 0.6));
+            --section-background: rgba(0, 0, 0, 0.05);
+        }
+
+        body {
+            background: var(--background);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            margin: 0;
+            padding: 0;
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .header {
+            text-align: center;
+            padding: 4rem 0;
+            position: relative;
+        }
+
+        .title {
+            font-size: 3.5rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+            color: var(--primary);
+            animation: float 3s ease-in-out infinite;
+        }
+
+        .theme-toggle {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            background: none;
+            border: none;
+            color: var(--text);
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        .subtitle {
+            font-size: 1.25rem;
+            color: var(--text);
+            animation: slideIn 1s ease-out;
+        }
+
+        .upload-section {
+            background: var(--section-background);
+            backdrop-filter: blur(12px);
+            border-radius: 1.5rem;
+            padding: 3rem;
+            margin: 2rem 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .upload-box {
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 1rem;
+            padding: 3rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .upload-box:hover {
+            border-color: var(--primary);
+            background: rgba(0, 207, 200, 0.05);
+        }
+
+        .btn {
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .btn::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: width 0.4s, height 0.4s;
+        }
+
+        .btn:hover::after {
+            width: 200px;
+            height: 200px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 207, 200, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .alert.error {
+            background: rgba(255, 0, 0, 0.2);
+            color: #ff6666;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .result-card {
+            background: var(--card-background);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            margin-top: 2rem;
+            display: none;
+            position: relative;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .result-card:hover {
+            transform: scale(1.02);
+            box-shadow: 0 10px 20px rgba(0, 207, 200, 0.2);
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .image-preview {
+            border-radius: 1rem;
+            overflow: hidden;
+            position: relative;
+            height: 300px;
+        }
+
+        .preview-image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 1rem;
+        }
+
+        .chart-container {
+            background: var(--section-background);
+            border-radius: 1rem;
+            padding: 1rem;
+        }
+
+        .progress-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            z-index: 1000;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            width: 0;
+            transition: width 0.4s ease-out;
+        }
+
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 25, 47, 0.9);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            border-radius: 1rem;
+            z-index: 100;
+        }
+
+        .pyramid-loader {
+            width: 150px;
+            height: 150px;
+            position: relative;
+            transform-style: preserve-3d;
+            transform: rotateX(-20deg) rotateY(30deg);
+        }
+
+        .pyramid-loader:before,
+        .pyramid-loader:after {
+            content: '';
+            position: absolute;
+            width: 0;
+            border-left: 75px solid transparent;
+            border-right: 75px solid transparent;
+        }
+
+        .pyramid-loader:before {
+            bottom: 0;
+            border-bottom: 150px solid var(--primary);
+            animation: pyramidLoader 2s infinite linear;
+        }
+
+        .pyramid-loader:after {
+            top: 0;
+            border-top: 150px solid var(--secondary);
+            animation: pyramidLoader 2s infinite linear reverse;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes pyramidLoader {
+            0% { opacity: 0.1; }
+            50% { opacity: 1; }
+            100% { opacity: 0.1; }
+        }
+
+        @keyframes slideIn {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        @media (max-width: 768px) {
+            .result-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1 class="title">Smart Solar Clean</h1>
+            <p class="subtitle">Advanced Solar Panel Dust Prediction System</p>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <i class="fas fa-sun"></i>
+            </button>
+        </div>
+
+        <div class="upload-section">
+            <form id="uploadForm" enctype="multipart/form-data">
+                <div class="upload-box" id="dropArea" role="button" aria-label="Upload or drag and drop an image">
+                    <i class="fas fa-cloud-upload-alt fa-3x mb-3"></i>
+                    <h3>Drag & Drop or Click to Upload</h3>
+                    <p>Supported formats: PNG, JPG, JPEG</p>
+                    <input type="file" id="fileInput" name="file" accept=".png,.jpg,.jpeg" style="display: none;">
+                </div>
+                <button type="submit" class="btn" id="analyzeBtn">
+                    <i class="fas fa-rocket mr-2"></i> Analyze Now
+                </button>
+            </form>
+
+            <div class="alert error" id="errorAlert" role="alert" aria-live="polite" style="display: none;"></div>
+
+            <div class="result-card" id="resultCard">
+                <div class="loading-overlay" id="loadingOverlay">
+                    <div class="pyramid-loader"></div>
+                </div>
+                
+                <h2>Analysis Result</h2>
+                <div class="result-grid">
+                    <div class="image-preview">
+                        <img class="preview-image" id="previewImage" src="" alt="Analyzed Panel">
+                    </div>
+                    <div class="chart-container" id="gaugeChart"></div>
+                </div>
+                
+                <div class="result-grid">
+                    <div class="chart-container" id="powerChart"></div>
+                    <div class="chart-container" id="trendChart"></div>
+                </div>
+                
+                <div id="recommendation">
+                    <h3>Maintenance Recommendation</h3>
+                    <p id="recommendationText"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <script>
+        let analysisHistory = JSON.parse(localStorage.getItem('analysisHistory')) || [];
+        let gaugeChart, trendChart, powerChart;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const rootStyles = getComputedStyle(document.documentElement);
+            const primaryColor = rootStyles.getPropertyValue('--primary').trim();
+            const secondaryColor = rootStyles.getPropertyValue('--secondary').trim();
+
+            // Apply saved theme on load
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            document.querySelector('.theme-toggle i').className = savedTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+
+            // Drag and drop handlers
+            const dropArea = document.getElementById('dropArea');
+            const fileInput = document.getElementById('fileInput');
+            
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, preventDefaults, false);
+            });
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropArea.addEventListener(eventName, highlight, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, unhighlight, false);
+            });
+
+            dropArea.addEventListener('drop', handleDrop, false);
+            dropArea.addEventListener('click', () => fileInput.click());
+            dropArea.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    fileInput.click();
+                }
+            });
+            dropArea.setAttribute('tabindex', '0');
+
+            // Form submission with validation
+            document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const file = fileInput.files[0];
+                if (!file) return showError('Please select an image first');
+                const validTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+                const maxSize = 8 * 1024 * 1024; // 8MB
+                if (!validTypes.includes(file.type)) {
+                    return showError('Only PNG, JPG, or JPEG files are allowed');
+                }
+                if (file.size > maxSize) {
+                    return showError('File size must be less than 8MB');
+                }
+
+                const analyzeBtn = document.getElementById('analyzeBtn');
+                const progressBar = document.getElementById('progressBar');
+                const progressContainer = document.getElementById('progressContainer');
+                const loadingOverlay = document.getElementById('loadingOverlay');
+
+                // Show loading states
+                loadingOverlay.style.display = 'flex';
+                document.getElementById('resultCard').style.display = 'block';
+                analyzeBtn.disabled = true;
+                analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Analyzing...';
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+
+                    // Show preview image
+                    const previewImage = document.getElementById('previewImage');
+                    previewImage.src = URL.createObjectURL(file);
+
+                    // Show progress bar and simulate upload
+                    progressContainer.style.display = 'block';
+                    let progress = 0;
+                    const progressInterval = setInterval(() => {
+                        progress += Math.random() * 15;
+                        progressBar.style.width = `${Math.min(progress, 95)}%`;
+                    }, 200);
+
+                    const response = await fetch('/analyze', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    clearInterval(progressInterval);
+                    const data = await response.json();
+                    
+                    if (!response.ok) throw new Error(data.error || 'Analysis failed');
+                    
+                    // Finalize progress
+                    progressBar.style.width = '100%';
+                    setTimeout(() => progressBar.style.width = '0%', 500);
+
+                    // Store analysis data
+                    const newEntry = {
+                        value: data.dustiness,
+                        date: new Date().toLocaleString(),
+                        power: 100 - data.dustiness
+                    };
+                    analysisHistory.push(newEntry);
+                    localStorage.setItem('analysisHistory', JSON.stringify(analysisHistory));
+
+                    // Update visualizations
+                    updateCharts(data.dustiness, primaryColor, secondaryColor);
+                    showRecommendation(data.dustiness);
+
+                } catch (error) {
+                    showError(error.message);
+                } finally {
+                    loadingOverlay.style.display = 'none';
+                    progressContainer.style.display = 'none';
+                    analyzeBtn.disabled = false;
+                    analyzeBtn.innerHTML = '<i class="fas fa-rocket mr-2"></i> Analyze Now';
+                }
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            function highlight() {
+                dropArea.style.borderColor = primaryColor;
+                dropArea.style.backgroundColor = 'rgba(0, 207, 200, 0.1)';
+            }
+
+            function unhighlight() {
+                dropArea.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+                dropArea.style.backgroundColor = 'transparent';
+            }
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                if (files.length) fileInput.files = files;
+            }
+
+            function updateCharts(dustiness, primary, secondary) {
+                const textColor = rootStyles.getPropertyValue('--text').trim();
+                const gridColor = rootStyles.getPropertyValue('--grid-color').trim();
+
+                if (!gaugeChart) {
+                    gaugeChart = new ApexCharts(document.querySelector("#gaugeChart"), {
+                        series: [dustiness],
+                        chart: { type: 'radialBar', height: 350 },
+                        plotOptions: {
+                            radialBar: {
+                                startAngle: -135,
+                                endAngle: 135,
+                                hollow: { size: '70%' },
+                                track: { background: '#2d2d39' },
+                                dataLabels: {
+                                    name: { show: false },
+                                    value: {
+                                        offsetY: 0,
+                                        fontSize: '22px',
+                                        color: textColor,
+                                        formatter: (val) => `${Math.round(val)}%`
+                                    }
+                                }
+                            }
+                        },
+                        fill: {
+                            type: 'gradient',
+                            gradient: {
+                                shade: 'dark',
+                                type: 'horizontal',
+                                gradientToColors: [primary],
+                                stops: [0, 100]
+                            }
+                        },
+                        colors: [primary],
+                        stroke: { lineCap: 'round' }
+                    });
+                    gaugeChart.render();
+                } else {
+                    gaugeChart.updateSeries([dustiness]);
+                }
+
+                if (!powerChart) {
+                    powerChart = new ApexCharts(document.querySelector("#powerChart"), {
+                        series: [{
+                            name: 'Power Potential',
+                            data: [100 - dustiness]
+                        }],
+                        chart: {
+                            type: 'bar',
+                            height: 350,
+                            background: 'transparent'
+                        },
+                        plotOptions: {
+                            bar: {
+                                borderRadius: 4,
+                                columnWidth: '60%',
+                            }
+                        },
+                        colors: [secondary],
+                        xaxis: { categories: ['Current Analysis'] },
+                        yaxis: { 
+                            max: 100,
+                            labels: { 
+                                style: { colors: textColor },
+                                formatter: (val) => Math.round(val)
+                            },
+                            title: { text: 'Percentage (%)', style: { color: textColor } }
+                        },
+                        grid: { borderColor: gridColor },
+                        dataLabels: { enabled: false }
+                    });
+                    powerChart.render();
+                } else {
+                    powerChart.updateSeries([{ data: [100 - dustiness] }]);
+                }
+
+                if (!trendChart) {
+                    trendChart = new ApexCharts(document.querySelector("#trendChart"), {
+                        series: [
+                            { name: 'Dust Level', data: analysisHistory.map(entry => entry.value) },
+                            { name: 'Power Potential', data: analysisHistory.map(entry => entry.power) }
+                        ],
+                        chart: {
+                            type: 'line',
+                            height: 350,
+                            background: 'transparent'
+                        },
+                        colors: [primary, secondary],
+                        xaxis: {
+                            categories: analysisHistory.map(entry => entry.date),
+                            labels: { style: { colors: textColor } }
+                        },
+                        yaxis: { 
+                            max: 100,
+                            tickAmount: 5,
+                            labels: { 
+                                style: { colors: textColor },
+                                formatter: (val) => Math.round(val)
+                            },
+                            title: { text: 'Percentage (%)', style: { color: textColor } }
+                        },
+                        grid: { borderColor: gridColor },
+                        stroke: { width: 3, curve: 'smooth' }
+                    });
+                    trendChart.render();
+                } else {
+                    trendChart.updateSeries([
+                        { data: analysisHistory.map(entry => entry.value) },
+                        { data: analysisHistory.map(entry => entry.power) }
+                    ]);
+                }
+            }
+
+            function showRecommendation(value) {
+                let recommendation = '';
+                let cleaningMethod = '';
+                if (value < 20) {
+                    recommendation = `🌟 Excellent condition! Your solar panels are clean and operating at peak efficiency.`;
+                    cleaningMethod = `Use a soft cloth and water to maintain cleanliness if needed.`;
+                } else if (value < 50) {
+                    recommendation = `⚠️ Moderate dust accumulation detected. Consider cleaning within the next 2 weeks.`;
+                    cleaningMethod = `Use a gentle pressure wash or automated cleaning brushes for effective dust removal.`;
+                } else {
+                    recommendation = `🚨 High dust level! Immediate cleaning recommended.`;
+                    cleaningMethod = `Hire professional cleaning services to safely remove heavy dust buildup.`;
+                }
+                document.getElementById('recommendationText').textContent = `${recommendation} ${cleaningMethod}`;
+            }
+
+            function showError(message) {
+                const errorAlert = document.getElementById('errorAlert');
+                errorAlert.textContent = message;
+                errorAlert.style.display = 'block';
+                setTimeout(() => errorAlert.style.display = 'none', 5000);
+            }
+
+            function toggleTheme() {
+                const html = document.documentElement;
+                const currentTheme = html.getAttribute('data-theme') || 'dark';
+                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                html.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+                document.querySelector('.theme-toggle i').className = newTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+            }
+        });
+    </script>
+</body>
+</html>
