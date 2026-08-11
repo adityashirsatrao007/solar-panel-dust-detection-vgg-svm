@@ -212,7 +212,7 @@ def main():
         gamma_grid = ["scale", "auto"]
 
     def _score(C, gamma):
-        svm = SVC(kernel=args.kernel, C=C, gamma=gamma, probability=True,
+        svm = SVC(kernel=args.kernel, C=C, gamma=gamma or "scale", probability=True,
                   class_weight="balanced", random_state=SEED)
         cvs = []
         for tr, va in StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED).split(Xtr_s, ytr):
@@ -225,7 +225,7 @@ def main():
     best, best_score = None, -1.0
     patience, misses = 3, 0
     for cand in candidates:
-        cv_score, _ = _score(cand["C"], cand["gamma"] or ("scale" if args.kernel == "rbf" else None))
+        cv_score, _ = _score(cand["C"], cand["gamma"])
         print(f"  {cand} -> cv_acc {cv_score:.4f}")
         if cv_score > best_score:
             best_score, best = cv_score, cand
@@ -247,8 +247,8 @@ def main():
     print(f"Best hyperparams: {best} (cv {best_score:.4f})")
 
     # 3) final fit
-    svm = SVC(kernel=args.kernel, C=best["C"], gamma=best["gamma"], probability=True,
-              class_weight="balanced", random_state=SEED)
+    svm = SVC(kernel=args.kernel, C=best["C"], gamma=best["gamma"] or "scale",
+              probability=True, class_weight="balanced", random_state=SEED)
     svm.fit(Xtr_s, ytr)
     y_pred = svm.predict(Xte_s)
     y_proba = svm.predict_proba(Xte_s)
@@ -267,20 +267,45 @@ def main():
     if args.train_head and n_cls >= 2:
         import tensorflow as tf
         from tensorflow.keras import layers
-        xtr, xva = Xtr_s[: int(0.8 * len(Xtr_s))], Xtr_s[int(0.8 * len(Xtr_s)):]
-        ytrh, yvah = ytr[: len(xtr)], ytr[len(xtr):]
+        xtr, xva = Xtr_s[: int(0.8 * len(Xtr_s))].astype(np.float32), \
+        Xtr_s[int(0.8 * len(Xtr_s)):].astype(np.float32)
+        ytrh = np.asarray(ytr[: len(xtr)], dtype=np.int32)
+        yvah = np.asarray(ytr[len(xtr):], dtype=np.int32)
         m = tf.keras.Sequential([
-            layers.Input(shape=(Xtr_s.shape[1],)),
+            layers.Input(shape=(Xtr_s.shape[1],), dtype=tf.float32),
             layers.Dropout(0.3),
             layers.Dense(128, activation="relu"),
             layers.Dropout(0.3),
             layers.Dense(n_cls, activation="softmax"),
         ])
-        m.compile("adam", "sparse_categorical_crossentropy", ["accuracy"])
+        m.compile("adam", "sparse_categorical_crossentropy")
+        class _AccHistory(tf.keras.callbacks.Callback):
+            """Record train/val accuracy per epoch (works around the Keras 3.15
+            'accuracy' metric dtype bug on some builds)."""
+
+            def __init__(self, xtr_, ytr_, xva_, yva_):
+                super().__init__()
+                self.ep_acc, self.ep_val_acc = [], []
+                self._x, self._y = xtr_, ytr_
+                self._xv, self._yv = xva_, yva_
+
+            def on_epoch_end(self, epoch, logs=None):
+                tr_pred = np.argmax(self.model.predict(self._x, verbose=0), axis=1)
+                self.ep_acc.append(float(np.mean(tr_pred == self._y)))
+                va_pred = np.argmax(self.model.predict(self._xv, verbose=0), axis=1)
+                self.ep_val_acc.append(float(np.mean(va_pred == self._yv)))
+
+            def history(self):
+                return {"accuracy": self.ep_acc, "val_accuracy": self.ep_val_acc}
+
+        acc_hook = _AccHistory(xtr, ytrh, xva, yvah)
         head = m.fit(xtr, ytrh, epochs=args.head_epochs, batch_size=32,
                      validation_data=(xva, yvah), verbose=0,
-                     callbacks=[tf.keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True),
+                     callbacks=[acc_hook,
+                                tf.keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True),
                                 tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3)]).history
+        head.update(acc_hook.history())
+        m.save(os.path.join(model_dir, "calibration_head.h5"))
         m.save(os.path.join(model_dir, "calibration_head.h5"))
         print("Calibration head saved to", os.path.join(model_dir, "calibration_head.h5"))
 
