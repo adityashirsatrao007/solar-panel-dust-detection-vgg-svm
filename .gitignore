@@ -1,0 +1,26 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# training caches (keep the tracked deployed models)
+*.npz
+cache_features.npz
+Models/*.h5
+
+# emoji-free note: trained SVM/scaler are intentionally tracked (deployed artifacts)
+
+# app runtime artifacts
+static/uploads/*
+!static/uploads/.gitkeep
+static/explain/*
+!static/explain/.gitkeep
+
+# OS
+.DS_Store
