@@ -217,36 +217,44 @@ def explain_image(image_path, extractor=None, threshold=CONF_THRESHOLD):
 def shap_top_channels(features, svm, scaler, nsamples=64, max_display=15, seed=7):
     """
     Offline SHAP attribution over the GAP vector feeding the SVM head.
-    Returns (fig, shap_values). Note: SHAP on component features is exponential
-    in dimension, hence designed for offline paper-figure generation only.
+    For the deployed linear model the attributions are computed exactly and in
+    closed form (phi_j = coef_j * (z_j - E[z_j]) in scaled space). For RBF kernels
+    we fall back to the KernelExplainer. Designed for offline paper-figure use.
+
+    Returns: (matplotlib Figure, shap_values | None)
     """
-    import shap
-
-    background = features[: min(len(features), 50)]
-    explainer = shap.KernelExplainer(svm.predict_proba, background)
-    shap_values = explainer.shap_values(features[: min(len(features), nsamples)],
-                                        nsamples=min(nsamples, 64))
-
-    if isinstance(shap_values, list):  # multiclass -> take argmax class slice
-        vals = shap_values[int(np.argmax(svm.predict(features[: min(len(features), nsamples)]), axis=1))]
-    else:
-        vals = shap_values
-    mean_abs = np.abs(vals).mean(axis=0)
-    top_idx = np.argsort(mean_abs)[-max_display:][::-1]
-
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    feats = np.asarray(features, dtype=np.float64)
+    zs = scaler.transform(feats)
+    bkg_mean = zs[: min(len(zs), 50)].mean(axis=0)
+
+    if getattr(svm, "kernel", None) == "linear":
+        coef = svm.coef_[0]
+        phi = (zs - bkg_mean) * coef
+    else:
+        import shap
+
+        explainer = shap.KernelExplainer(svm.predict_proba, zs[: min(len(zs), 50)])
+        phi = np.asarray(explainer.shap_values(zs)[: min(len(zs), nsamples)])
+        if phi.ndim != 2:  # multiclass -> argmax class slice
+            cl = int(np.argmax(svm.predict(zs[: min(len(zs), nsamples)]), axis=1))
+            phi = np.asarray(phi)[cl]
+
+    mean_abs = np.abs(phi).mean(axis=0)
+    top_idx = np.argsort(mean_abs)[-max_display:][::-1]
+
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.barh(np.arange(len(top_idx))[::-1], mean_abs[top_idx], color="#4c78a8")
     ax.set_yticks(np.arange(len(top_idx))[::-1])
     ax.set_yticklabels([f"ch-{i}" for i in top_idx])
-    ax.set_xlabel("Mean |SHAP| (channel importance)")
-    ax.set_title("SHAP feature importance - SVM dust decision")
+    ax.set_xlabel("Mean |SHAP| (channel contribution to dust decision)")
+    ax.set_title("Fig. 10 - SHAP feature importance - SVM dust decision")
     plt.tight_layout()
-    return fig, shap_values
+    return fig, phi
 
 
 def _main():
