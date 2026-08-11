@@ -65,10 +65,15 @@ def load_pipeline() -> dict:
 
 
 def build_feature_extractor():
-    """VGG16 (imagenet, frozen) returning block5_conv3 feature maps + GAP vector."""
+    """VGG16 (imagenet, frozen).
+
+    The pooling head MUST match the deployed SVM: GAP over the final VGG16
+    output (block5_pool), not block5_conv3. block5_conv3 is additionally exposed
+    for Grad-CAM localization only.
+    """
     base = VGG16(weights="imagenet", include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
     conv = base.get_layer("block5_conv3").output
-    pooled = GlobalAveragePooling2D()(conv)
+    pooled = GlobalAveragePooling2D()(base.output)
     model = Model(inputs=base.input, outputs=[conv, pooled])
     model.name = "vgg16_gap_conv"
     return model
