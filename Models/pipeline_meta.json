@@ -1,0 +1,13 @@
+{
+  "kernel": "linear",
+  "svm": {
+    "C": 1.0,
+    "kernel": "linear",
+    "probability": true,
+    "class_weight": "balanced"
+  },
+  "img_size": 128,
+  "feature": "VGG16_imagenet_GlobalAveragePooling",
+  "classes": ["clean", "dirty"],
+  "note": "Inferred from the deployed classifier. Retrain with train_solar_dust.py to refresh."
+}

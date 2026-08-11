@@ -23,6 +23,39 @@ Scales for rooftop and large solar installations
 
 The system uses light sensors and camera-based AI analysis to detect dust levels on solar panels. When dust exceeds a predefined threshold, an ESP32-controlled cleaning mechanism activates a mist spray and wiper to safely clean the panel. All results are visualized on a real-time dashboard.
 
+🧠 Explainable AI (Grad-CAM + SHAP)
+
+Every prediction is accompanied by an explanation, so operators can verify that the model is looking at the panel surface and not at background artefacts:
+
+• Grad-CAM localization heatmaps — generated from the last convolutional block (`block5_conv3`) of the VGG16 encoder. For the deployed linear SVM the gradient of the decision score w.r.t. the pooled features is computed in closed form (`coef_ / scale`); RBF kernels are handled via the analytic Jacobian of the RBF decision function. The heatmap overlay shows exactly which surface regions drove the dust decision.
+• SHAP feature attributions — offline Shapley values over the 512-dimensional GAP vector that feeds the SVM head, identifying the top contributing texture / colour channels per class.
+• Confidence-gated review — samples classified below an 0.85 confidence threshold are flagged `requires_review: true` for human inspection and returned to the curation pool.
+
+Endpoints
+
+• `POST /analyze` — original dashboard endpoint. Returns `dustiness` percentage + confidence.
+• `POST /explain` — new XAI endpoint. Returns probabilities, predicted class, confidence, `requires_review` flag, spatial-concentration of the localization mass and a base64 Grad-CAM overlay PNG.
+
+CLI
+
+    python explanations.py --image <panel_image.jpg>          # prints audit + saves Grad-CAM overlay
+
+Training from scratch
+
+    pip install -r requirements.txt
+    # dataset layout:
+    #   dataset/train/clean/*.jpg  dataset/train/dirty/*.jpg
+    #   dataset/test/clean/*.jpg   dataset/test/dirty/*.jpg
+    python train_solar_dust.py --data ./dataset --train-head
+
+The training script extracts VGG16 GAP features, standardizes them, runs an early-pruned search over the SVM hyperparameters, saves the artifacts under `Models/` (`svm_classifier.pkl`, `scaler.pkl`, `class_names.json`, `pipeline_meta.json`) and generates all paper figures (`fig5_metrics.png`, `fig6_confusion_matrix.png`, `fig3_roc_auc.png`, `fig7_confidence.png`, `fig8_loss_accuracy.png`).
+
+Public datasets to get started
+
+• Kaggle – Solar Photovoltaics Panel for Dust Detection: https://www.kaggle.com/datasets/safwanshamsir99/solar-photovoltaics-panell-for-dust-dectection
+• Kaggle – Solar Panel Images Clean & Faulty: https://www.kaggle.com/datasets/pythonafroz/solar-panel-images
+• Kaggle – Solar Panel Dust Detection: https://www.kaggle.com/datasets/hemanthsai7/solar-panel-dust-detection
+
 ⚙️ Key Features
 
 • AI-based dust detection using VGG16 + SVM
@@ -33,12 +66,13 @@ The system uses light sensors and camera-based AI analysis to detect dust levels
 • Environmental and financial impact estimation
 • IoT-ready and cloud-scalable architecture
 • Fallback mode if ML models are unavailable
+• Explainable predictions (Grad-CAM heatmaps + SHAP attributions + review flags)
 
 🧠 Technology Stack
 
 Backend: Python, Flask, TensorFlow, scikit-learn, Joblib
 Frontend: HTML5, CSS3, JavaScript, Tailwind CSS
-AI/ML: VGG16 (feature extraction), SVM (classification)
+AI/ML: VGG16 (feature extraction), SVM (classification), SHAP + Grad-CAM (explainable AI)
 Hardware: ESP32, BH1750, Camera Module, Pump, Motor Driver, Wiper
 
 🏗️ Working Principle
