@@ -1,13 +1,20 @@
 {
+  "img_size": 128,
   "kernel": "linear",
   "svm": {
-    "C": 1.0,
-    "kernel": "linear",
-    "probability": true,
-    "class_weight": "balanced"
+    "C": 0.1,
+    "gamma": null
   },
-  "img_size": 128,
-  "feature": "VGG16_imagenet_GlobalAveragePooling",
-  "classes": ["clean", "dirty"],
-  "note": "Inferred from the deployed classifier. Retrain with train_solar_dust.py to refresh."
+  "classes": [
+    "clean",
+    "dirty"
+  ],
+  "train_samples": 673,
+  "test_samples": 169,
+  "scores": {
+    "accuracy": 0.893491124260355,
+    "precision": 0.8942254326869712,
+    "recall": 0.893491124260355,
+    "f1": 0.8937303833290454
+  }
 }

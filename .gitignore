@@ -14,6 +14,12 @@ venv/
 cache_features.npz
 Models/*.h5
 
+# prepared dataset images (reproduce with scripts/prepare_data.py)
+data/train/
+data/test/
+data/clean/
+data/dirty/
+
 # emoji-free note: trained SVM/scaler are intentionally tracked (deployed artifacts)
 
 # app runtime artifacts

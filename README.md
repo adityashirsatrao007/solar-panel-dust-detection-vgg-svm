@@ -81,7 +81,21 @@ Training from scratch
     #   dataset/test/clean/*.jpg   dataset/test/dirty/*.jpg
     python train_solar_dust.py --data ./dataset --train-head
 
-The training script extracts VGG16 GAP features, standardizes them, runs an early-pruned search over the SVM hyperparameters, saves the artifacts under `Models/` (`svm_classifier.pkl`, `scaler.pkl`, `class_names.json`, `pipeline_meta.json`) and generates all paper figures (`fig5_metrics.png`, `fig6_confusion_matrix.png`, `fig3_roc_auc.png`, `fig7_confidence.png`, `fig8_loss_accuracy.png`).
+The training script extracts VGG16 GAP features, standardizes them, runs an early-pruned search over the SVM hyperparameters, trains an optional calibration head, saves the artifacts under `Models/` (`svm_classifier.pkl`, `scaler.pkl`, `class_names.json`, `pipeline_meta.json`) and generates all paper figures (`fig5_metrics.png`, `fig6_confusion_matrix.png`, `fig3_roc_auc.png`, `fig7_confidence.png`, `fig8_loss_accuracy.png`).
+
+### Reported test metrics
+
+Validated on a held-out test split (169 images / 842 total, 80:20 stratified):
+
+| Metric | Value |
+|--------|-------|
+| Accuracy | **0.8935** |
+| Precision (weighted) | 0.8942 |
+| Recall (weighted) | 0.8935 |
+| F1 (weighted) | 0.8937 |
+| CV accuracy (5-fold) | 0.9153 |
+
+Scores are written to `Models/pipeline_meta.json` by the trainer.
 
 Public datasets to get started
 
