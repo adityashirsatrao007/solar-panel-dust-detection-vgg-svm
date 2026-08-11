@@ -3,6 +3,39 @@
 
 An AI-driven, IoT-enabled solar panel maintenance system that detects dust accumulation, automates water-efficient cleaning, and improves solar energy output. Designed for smart cities, municipal solar plants, and large-scale renewable energy deployments, this project addresses real-world efficiency loss using computer vision, embedded systems, and intelligent automation.
 
+🚀 Quick Start
+
+Install
+
+    pip install -r requirements.txt
+
+Run the dashboard
+
+    python app.py          # http://127.0.0.1:5000
+
+Explain one image (CLI)
+
+    python explanations.py --image static/uploads/Imgclean_12_0.jpg
+
+API
+
+    curl -F "file=@static/uploads/Imgclean_12_0.jpg" http://127.0.0.1:5000/analyze
+    curl -F "file=@static/uploads/Imgclean_12_0.jpg" http://127.0.0.1:5000/explain
+
+Test
+
+    pip install pytest
+    python -m pytest
+
+Generate XAI paper figures
+
+    python scripts/make_xai_figures.py     # figures/fig9_gradcam.png, fig10_shap.png
+
+Prepare data & retrain
+
+    python scripts/prepare_data.py                       # structures data/ from Kaggle
+    python train_solar_dust.py --data data --train-head # retrains + writes all figures
+
 🚀 Problem Statement
 
 Dust accumulation reduces solar panel efficiency by 20–30%, leading to significant power loss, increased maintenance costs, and water-intensive manual cleaning. Existing robotic cleaners are expensive and difficult to scale. A smart, automated, and cost-effective solution is required.
@@ -117,7 +150,22 @@ AI-based predictive cleaning, cloud analytics, mobile monitoring app, real IoT s
 
 📁 Project Structure
 
-Advanced solar panel project with Flask backend, ML models, modular frontend, IoT-ready static assets, and scalable architecture.
+```
+solar-panel-dust-xai/
+├── app.py                     # Flask dashboard + /analyze + /explain APIs
+├── explanations.py            # Grad-CAM, SVM attribution, SHAP, review flags
+├── train_solar_dust.py        # End-to-end retraining + paper figures
+├── requirements.txt
+├── Models/                    # Deployed artifacts (SVM, scaler, class map, meta)
+├── static/uploads/            # Bundled sample images for demos & tests
+├── scripts/
+│   ├── prepare_data.py        # Kaggle dataset downloader / folder structurer
+│   └── make_xai_figures.py    # fig9_gradcam.png + fig10_shap.png
+├── figures/                   # Generated paper figures
+├── data/                      # Prepared dataset (gitignored)
+├── tests/                     # pytest suite (pure-python + deployed-model tests)
+└── .github/workflows/ci.yml   # CI: compile-check, pytest, figure generation
+```
 
 🏷️ Domain Classification
 
@@ -134,3 +182,24 @@ Patent Range: Automated Solar Panel Cleaning Systems
 ✔ Strong sustainability focus
 
 This project demonstrates end-to-end system design, combining AI, embedded systems, and renewable energy engineering into a deployable real-world solution.
+
+📚 Credits & Citation
+
+Data
+
+Thanks to the authors of the Kaggle soiling datasets used for training (see "Public datasets to get started"). If you reuse the training artefacts or figures produced by `train_solar_dust.py`, cite the paper:
+
+    A. Adhatrao, K. Zadbuke, P. Sangolgi, A. Shirsatrao, M. Waghamare and S. Shah,
+    "A Hybrid VGG16–SVM Framework for Automated Dust Detection on Solar Panels
+     with Explainable AI", IEEE, 2025.
+
+Explainability references
+
+- R. R. Selvaraju et al., "Grad-CAM: Visual Explanations from Deep Networks via
+  Gradient-Based Localization", ICCV 2017.
+- S. M. Lundberg and S.-I. Lee, "A Unified Approach to Interpreting Model
+  Predictions", NeurIPS 2017.
+
+License
+
+Dataset and trained-model artefacts belong to their respective sources; the code is shared for research and demonstration purposes. Rotate any credentials before deploying (see `.env.example`).
