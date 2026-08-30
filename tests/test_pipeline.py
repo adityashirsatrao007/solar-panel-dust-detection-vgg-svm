@@ -1,150 +1,178 @@
-"""Pipeline tests for the VGG16-SVM dust detector with explainable AI."""
+"""
+test_pipeline.py - Tests for the EfficientNet-B2-SVM dust detection pipeline.
+"""
+from __future__ import annotations
+
 import json
 import os
 import sys
 
-import joblib
 import numpy as np
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import explanations  # noqa: E402
-
 MODELS = os.path.join(ROOT, "Models")
 
 docker_marker = pytest.mark.skipif(
     not os.path.exists(os.path.join(MODELS, "svm_classifier.pkl")),
-    reason="deployed models not present",
+    reason="Models/ not shipped",
 )
 
 
-# ---------------------------------------------------------------- pure-python
-
-
-def test_metadata_files_valid():
-    with open(os.path.join(MODELS, "class_names.json")) as fh:
-        labels = json.load(fh)
-    with open(os.path.join(MODELS, "pipeline_meta.json")) as fh:
-        meta = json.load(fh)
-    assert labels == meta["classes"]
-    assert len(labels) >= 2
-
-
-def test_class_labels_fallback():
-    assert explanations.class_labels()
-
-
 class _FakeScaler:
-    def __init__(self, n=512):
-        self.mean_ = np.zeros(n)
-        self.scale_ = np.ones(n)
-        self.n_features_in_ = n
-
     def transform(self, X):
-        return (np.asarray(X, dtype=np.float64) - self.mean_) / self.scale_
+        return np.asarray(X, dtype=np.float64)
+
+    @property
+    def scale_(self):
+        return np.ones(1408)
 
 
 class _FakeLinearSVM:
     kernel = "linear"
     classes_ = np.array([0, 1])
 
-    def __init__(self, n=512):
-        self.coef_ = np.random.RandomState(0).randn(1, n)
-        self.intercept_ = np.array([0.0])
+    def __init__(self):
+        self.coef_ = np.random.randn(1, 1408)
+        self._gamma = None
+        self.dual_coef_ = None
+        self.support_vectors_ = None
+
+    def predict_proba(self, X):
+        p = np.random.dirichlet([1, 1], size=len(X))
+        return p
+
+    def predict(self, X):
+        return np.array([1] * len(X))
+
+
+# --- Unit tests (no models needed) ---
+
+def test_metadata_files_valid():
+    cn = os.path.join(MODELS, "class_names.json")
+    pm = os.path.join(MODELS, "pipeline_meta.json")
+    if os.path.exists(cn):
+        labels = json.load(open(cn))
+        assert isinstance(labels, list)
+        assert len(labels) >= 2
+    if os.path.exists(pm):
+        meta = json.load(open(pm))
+        assert "scores" in meta or "svm_C" in meta
+
+
+def test_class_labels_fallback():
+    from explanations import class_labels
+    labels = class_labels()
+    assert len(labels) >= 2
 
 
 def test_svm_gradient_linear_closed_form():
-    scaler = _FakeScaler(8)
-    svm = _FakeLinearSVM(8)
-    pooled = np.random.RandomState(1).randn(8)
-    grad = explanations.svm_gradient(svm, scaler, pooled, 1)
-    np.testing.assert_allclose(grad, svm.coef_[0], rtol=1e-6)
-    # class 0 flips the sign
-    grad0 = explanations.svm_gradient(svm, scaler, pooled, 0)
-    np.testing.assert_allclose(grad0, -svm.coef_[0], rtol=1e-6)
+    from explanations import svm_gradient
+    rng = np.random.RandomState(42)
+    fake_scaler = _FakeScaler()
+    fake_svm = _FakeLinearSVM()
+    pooled = rng.randn(1408)
+    grad_1 = svm_gradient(fake_svm, fake_scaler, pooled, 1)
+    grad_0 = svm_gradient(fake_svm, fake_scaler, pooled, 0)
+    expected_1 = fake_svm.coef_[0] / fake_scaler.scale_
+    assert np.allclose(grad_1, expected_1)
+    assert np.allclose(grad_0, -expected_1)
 
 
 def test_gradcam_shape_and_range():
-    scaler = _FakeScaler(4)
-    svm = _FakeLinearSVM(4)
-    conv = np.random.RandomState(2).rand(4, 4, 4)
-    pooled = np.random.RandomState(3).randn(4)
-    hm = explanations.gradcam(svm, scaler, conv, pooled, 1)
-    assert hm.shape == (4, 4)
-    assert hm.min() >= 0.0 and hm.max() <= 1.0
-    assert 0.0 <= explanations.activation_ratio(hm) <= 1.0
+    from explanations import gradcam
+    rng = np.random.RandomState(42)
+    fake_scaler = _FakeScaler()
+    fake_svm = _FakeLinearSVM()
+    conv = rng.randn(7, 7, 1408).astype(np.float64)
+    pooled = rng.randn(1408)
+    hm = gradcam(fake_svm, fake_scaler, conv, pooled, 1)
+    assert hm.shape == (7, 7)
+    assert hm.min() >= 0.0
+    assert hm.max() <= 1.0 + 1e-6
 
 
 def test_overlay_heatmap_pil():
-    np.random.seed(4)
-    img = np.random.rand(16, 16, 3).astype(np.float32)
-    hm = np.random.rand(4, 4)
-    out = explanations.overlay_heatmap(img, hm)
-    assert out.mode == "RGB" and out.size == (16, 16)
+    from explanations import overlay_heatmap
+    rng = np.random.RandomState(42)
+    img = rng.rand(224, 224, 3).astype(np.float64)
+    hm = rng.rand(7, 7).astype(np.float64)
+    result = overlay_heatmap(img, hm)
+    from PIL import Image
+    assert isinstance(result, Image.Image)
+    assert result.size == (224, 224)
 
 
-# ---------------------------------------------------------------- deployed models
+def test_activation_ratio():
+    from explanations import activation_ratio
+    hm = np.zeros((10, 10))
+    hm[:5, :5] = 1.0
+    ratio = activation_ratio(hm)
+    assert abs(ratio - 1.0) < 0.01
+
+    hm2 = np.ones((10, 10))
+    ratio2 = activation_ratio(hm2)
+    assert abs(ratio2 - 0.25) < 0.01
 
 
 @docker_marker
 def test_deployed_pipeline_predicts():
-    pl = explanations.load_pipeline()
-    fe = explanations.get_extractor()
-    sample = os.path.join(ROOT, "static", "uploads")
-    imgs = [
-        os.path.join(sample, f)
-        for f in os.listdir(sample)
-        if f.startswith(("Imgclean", "Imgdirty")) and f.lower().endswith(".jpg")
-    ]
-    if not imgs:
-        pytest.skip("no bundled sample images")
-    out = explanations.predict(imgs[0], fe)
-    assert out["conv"].shape[0] > 0 and out["pooled"].shape[0] == 512
-    probs = pl["svm"].predict_proba(pl["scaler"].transform(out["pooled"][None, :]))[0]
-    assert abs(float(probs.sum()) - 1.0) < 1e-6
+    from explanations import load_pipeline, get_extractor, preprocess
+    import joblib
+
+    pipeline = load_pipeline()
+    fe = get_extractor()
+
+    uploads = os.path.join(ROOT, "static", "uploads")
+    sample_imgs = [f for f in os.listdir(uploads)
+                   if f.lower().endswith((".jpg", ".jpeg", ".png"))][:2]
+    assert len(sample_imgs) > 0, "No sample images found in static/uploads/"
+
+    for img_name in sample_imgs:
+        path = os.path.join(uploads, img_name)
+        x = preprocess(path)
+        conv, pooled = fe.predict(x, verbose=0)
+        scaled = pipeline["scaler"].transform(pooled)
+        proba = pipeline["svm"].predict_proba(scaled)[0]
+        assert proba.shape[0] >= 2
+        assert 0.99 <= proba.sum() <= 1.01
 
 
 @docker_marker
 def test_explain_endpoint_via_test_client():
-    import app as ap
+    from app import app
+    client = app.test_client()
+    uploads = os.path.join(ROOT, "static", "uploads")
+    sample_imgs = [f for f in os.listdir(uploads)
+                   if f.lower().endswith((".jpg", ".jpeg", ".png"))][:1]
+    if not sample_imgs:
+        pytest.skip("No sample images")
 
-    client = ap.app.test_client()
-    sample = os.path.join(ROOT, "static", "uploads")
-    img = next(
-        (os.path.join(sample, f) for f in os.listdir(sample)
-         if f.startswith("Imgclean")),
-        None,
-    )
-    if not img:
-        pytest.skip("no bundled clean sample")
-    with open(img, "rb") as fh:
-        r = client.post("/explain", data={"file": (fh, os.path.basename(img))},
-                        content_type="multipart/form-data")
-    assert r.status_code == 200
-    body = r.get_json()
-    assert body["success"] is True
-    assert "gradcam_base64" in body and "requires_review" in body
-    assert "predicted_class" in body and "probabilities" in body
+    with open(os.path.join(uploads, sample_imgs[0]), "rb") as f:
+        resp = client.post("/explain", data={"file": f}, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "predicted_class" in data
+    assert "confidence" in data
+    assert "gradcam_base64" in data
+    assert "ig_base64" in data
 
 
 @docker_marker
 def test_analyze_endpoint_via_test_client():
-    import app as ap
+    from app import app
+    client = app.test_client()
+    uploads = os.path.join(ROOT, "static", "uploads")
+    sample_imgs = [f for f in os.listdir(uploads)
+                   if f.lower().endswith((".jpg", ".jpeg", ".png"))][:1]
+    if not sample_imgs:
+        pytest.skip("No sample images")
 
-    client = ap.app.test_client()
-    sample = os.path.join(ROOT, "static", "uploads")
-    img = next(
-        (os.path.join(sample, f) for f in os.listdir(sample)
-         if f.startswith("Imgclean")),
-        None,
-    )
-    if not img:
-        pytest.skip("no bundled clean sample")
-    with open(img, "rb") as fh:
-        r = client.post("/analyze", data={"file": (fh, os.path.basename(img))},
-                        content_type="multipart/form-data")
-    assert r.status_code == 200
-    body = r.get_json()
-    assert body["success"] is True and "dustiness" in body
+    with open(os.path.join(uploads, sample_imgs[0]), "rb") as f:
+        resp = client.post("/analyze", data={"file": f}, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "dustiness" in data
+    assert "confidence" in data

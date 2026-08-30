@@ -1,23 +1,20 @@
 """
 prepare_data.py - Downloads and structures the solar panel soiling dataset.
 
-Automatically downloads the Kaggle "Solar Photovoltaics Panel for Dust Detection"
-dataset via kagglehub when Kaggle credentials are configured, and copies the
-images into the expected layout:
+Creates the expected layout with train/val/test splits:
 
     data/
       train/clean/*.jpg
       train/dirty/*.jpg
+      val/clean/*.jpg
+      val/dirty/*.jpg
       test/clean/*.jpg
       test/dirty/*.jpg
 
 Usage:
     python scripts/prepare_data.py             # auto download via kagglehub
     python scripts/prepare_data.py --manual    # interactive folder guidance
-
-If kagglehub is unavailable or unauthenticated, download the dataset manually
-from the URLs printed below and re-run this script pointed at the archive
-folder with --source /path/to/downloaded/folder.
+    python scripts/prepare_data.py --resplit   # re-split existing data into train/val/test
 """
 from __future__ import annotations
 
@@ -73,6 +70,39 @@ def collect(source_root: str, mapping: dict) -> None:
         print(f"  {cls}: {len(imgs)} images")
 
 
+def resplit_existing_data(val_ratio: float = 0.10) -> None:
+    """Re-split existing train/test data into train/val/test.
+
+    Moves val_ratio of training images from train/ into val/.
+    """
+    rng = np.random.RandomState(42)
+    for cls in ("clean", "dirty"):
+        train_dir = os.path.join(DATA_DIR, "train", cls)
+        val_dir = os.path.join(DATA_DIR, "val", cls)
+        os.makedirs(val_dir, exist_ok=True)
+
+        if not os.path.isdir(train_dir):
+            print(f"  Warning: {train_dir} not found, skipping")
+            continue
+
+        imgs = sorted(
+            f for f in os.listdir(train_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        )
+        rng.shuffle(imgs)
+        n_val = max(1, int(val_ratio * len(imgs)))
+        val_imgs = imgs[:n_val]
+
+        for img in val_imgs:
+            src = os.path.join(train_dir, img)
+            dst = os.path.join(val_dir, img)
+            shutil.move(src, dst)
+
+        n_remaining = len([f for f in os.listdir(train_dir)
+                          if f.lower().endswith((".jpg", ".jpeg", ".png"))])
+        print(f"  {cls}: moved {n_val} to val, {n_remaining} remain in train")
+
+
 def auto_download(archive: str) -> None:
     import kagglehub
 
@@ -80,7 +110,6 @@ def auto_download(archive: str) -> None:
     path = kagglehub.dataset_download(archive)
     print(f"Downloaded to {path}")
     ds = path if os.path.isdir(path) else os.path.dirname(path)
-    # infer label folders
     subdirs = sorted(
         d for d in os.listdir(ds)
         if os.path.isdir(os.path.join(ds, d))
@@ -117,16 +146,28 @@ def main():
     ap.add_argument("--source", help="path to an already-downloaded dataset folder")
     ap.add_argument("--manual", action="store_true",
                     help="do not auto-download; only structure --source")
+    ap.add_argument("--resplit", action="store_true",
+                    help="re-split existing train data into train/val/test")
+    ap.add_argument("--val-ratio", type=float, default=0.10,
+                    help="fraction of training data to move to val (default: 0.10)")
     args = ap.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    if args.source:
+
+    if args.resplit:
+        print("Re-splitting existing data into train/val/test...")
+        resplit_existing_data(args.val_ratio)
+    elif args.source:
         manual_setup(args.source)
+        print("\nNow re-splitting into train/val/test...")
+        resplit_existing_data(args.val_ratio)
     elif args.manual:
         raise SystemExit("--manual requires --source /path/to/dataset")
     else:
         try:
             auto_download(DEFAULT_ARCHIVE)
+            print("\nNow re-splitting into train/val/test...")
+            resplit_existing_data(args.val_ratio)
         except ImportError:
             raise SystemExit(
                 "kagglehub not installed - run: pip install kagglehub\n"
@@ -134,7 +175,7 @@ def main():
             )
 
     total = 0
-    for split in ("train", "test"):
+    for split in ("train", "val", "test"):
         for cls in ("clean", "dirty"):
             folder = os.path.join(DATA_DIR, split, cls)
             n = len([f for f in os.listdir(folder)] if os.path.isdir(folder) else [])

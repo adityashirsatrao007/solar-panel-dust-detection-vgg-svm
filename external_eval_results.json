@@ -1,0 +1,90 @@
+[
+  {
+    "dataset": "datasets_raw/dataset3/Detect_solar_dust",
+    "n": 2562,
+    "accuracy": 0.9824,
+    "mean_confidence": 0.9413,
+    "misclassified": 45,
+    "confusion": [
+      [
+        1469,
+        24
+      ],
+      [
+        21,
+        1048
+      ]
+    ],
+    "report": {
+      "clean": {
+        "precision": 0.9859060402684564,
+        "recall": 0.9839249832551908,
+        "f1-score": 0.9849145155883339,
+        "support": 1493.0
+      },
+      "dirty": {
+        "precision": 0.9776119402985075,
+        "recall": 0.980355472404116,
+        "f1-score": 0.9789817842129845,
+        "support": 1069.0
+      },
+      "accuracy": 0.9824355971896955,
+      "macro avg": {
+        "precision": 0.981758990283482,
+        "recall": 0.9821402278296534,
+        "f1-score": 0.9819481499006593,
+        "support": 2562.0
+      },
+      "weighted avg": {
+        "precision": 0.9824453092505504,
+        "recall": 0.9824355971896955,
+        "f1-score": 0.9824390706858168,
+        "support": 2562.0
+      }
+    }
+  },
+  {
+    "dataset": "datasets_raw/dataset2/Faulty_solar_panel",
+    "n": 383,
+    "accuracy": 0.9974,
+    "mean_confidence": 0.9504,
+    "misclassified": 1,
+    "confusion": [
+      [
+        192,
+        1
+      ],
+      [
+        0,
+        190
+      ]
+    ],
+    "report": {
+      "clean": {
+        "precision": 1.0,
+        "recall": 0.9948186528497409,
+        "f1-score": 0.9974025974025974,
+        "support": 193.0
+      },
+      "dirty": {
+        "precision": 0.9947643979057592,
+        "recall": 1.0,
+        "f1-score": 0.9973753280839895,
+        "support": 190.0
+      },
+      "accuracy": 0.9973890339425587,
+      "macro avg": {
+        "precision": 0.9973821989528796,
+        "recall": 0.9974093264248705,
+        "f1-score": 0.9973889627432935,
+        "support": 383.0
+      },
+      "weighted avg": {
+        "precision": 0.997402703921917,
+        "recall": 0.9973890339425587,
+        "f1-score": 0.9973890695421914,
+        "support": 383.0
+      }
+    }
+  }
+]

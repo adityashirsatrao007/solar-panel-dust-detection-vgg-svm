@@ -1,0 +1,180 @@
+[
+  {
+    "version": "v001",
+    "timestamp": "2026-08-29_19-49-32",
+    "backbone": "EfficientNet-B2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v002",
+    "timestamp": "2026-08-29_19-53-35",
+    "backbone": "EfficientNet-B2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v003",
+    "timestamp": "2026-08-29_20-05-35",
+    "backbone": "EfficientNet-B2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v004",
+    "timestamp": "2026-08-29_20-17-27",
+    "backbone": "EfficientNet-B2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v005",
+    "timestamp": "2026-08-29_20-39-19",
+    "backbone": "EfficientNet-B2",
+    "backbone_key": "efficientnetb2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v006",
+    "timestamp": "2026-08-29_20-47-45",
+    "backbone": "EfficientNet-B2",
+    "backbone_key": "efficientnetb2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "scale",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 758,
+    "val_samples": 84,
+    "test_samples": 84,
+    "scores": {
+      "accuracy": 0.9761904761904762,
+      "precision": 0.9761904761904762,
+      "recall": 0.9761904761904762,
+      "f1": 0.9761904761904762,
+      "auc": 0.9970588235294119,
+      "cv_accuracy": 0.9789037992331823
+    }
+  },
+  {
+    "version": "v007",
+    "timestamp": "2026-08-30_01-16-19",
+    "backbone": "EfficientNet-B2",
+    "backbone_key": "efficientnetb2",
+    "img_size": 224,
+    "feature_dim": 1408,
+    "kernel": "rbf",
+    "svm_C": 10.0,
+    "svm_gamma": "auto",
+    "classes": [
+      "clean",
+      "dirty"
+    ],
+    "train_samples": 3406,
+    "val_samples": 377,
+    "test_samples": 381,
+    "scores": {
+      "accuracy": 0.9028871391076115,
+      "precision": 0.9028782045015699,
+      "recall": 0.9028871391076115,
+      "f1": 0.9025684988481586,
+      "auc": 0.9595849802371542,
+      "cv_accuracy": 0.8637681346648236
+    }
+  }
+]
