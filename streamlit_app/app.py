@@ -69,7 +69,7 @@ def gradcam_overlay(conv, grad, img_size):
     import matplotlib
     matplotlib.use("Agg")
     cmap = matplotlib.colormaps.get_cmap("jet")
-    hm_pil = Image.fromarray(np.uint8(255 * np.clip(hm, 0, 1))).resize(img_size, Image.BILINEAR)
+    hm_pil = Image.fromarray(np.uint8(255 * np.clip(hm, 0, 1))).resize(img_size, Image.Resampling.BILINEAR)
     hm_arr = np.array(hm_pil).astype(np.float32) / 255.0
     rgb = cmap(hm_arr)[:, :, :3]
     orig = np.array(Image.new("RGB", img_size, (128, 128, 128))).astype(np.float32) / 255.0
