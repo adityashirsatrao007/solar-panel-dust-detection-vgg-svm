@@ -1,0 +1,8 @@
+tensorflow>=2.10
+scikit-learn>=1.2
+joblib>=1.2
+numpy>=1.22
+pillow>=9.0
+matplotlib>=3.5
+streamlit>=1.20
+huggingface_hub>=0.10
