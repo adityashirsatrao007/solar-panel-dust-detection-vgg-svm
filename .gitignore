@@ -9,12 +9,11 @@ __pycache__/
 .venv/
 venv/
 
-# training caches (keep the tracked deployed models)
+# training caches (deployed .pkl models are tracked)
 *.npz
-cache_features.npz
 Models/*.h5
 
-# prepared dataset images (reproduce with scripts/prepare_data.py)
+# datasets (regenerable)
 data/
 data_combined/
 data_merged/
@@ -22,20 +21,9 @@ data_merged2/
 datasets_raw/
 Models_backup_v006_842/
 
-# large image datasets (reproduce with scripts/prepare_data.py or make_combined_dataset.py)
-data_combined/
-data_merged/
-data_merged2/
-datasets_raw/
-Models_backup_v006_842/
-
-# emoji-free note: trained SVM/scaler are intentionally tracked (deployed artifacts)
-
 # app runtime artifacts
-static/uploads/*
-!static/uploads/.gitkeep
-static/explain/*
-!static/explain/.gitkeep
+static/uploads/
+static/explain/
 
 # OS
 .DS_Store
