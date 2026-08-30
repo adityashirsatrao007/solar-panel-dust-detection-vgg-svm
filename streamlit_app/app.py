@@ -7,12 +7,12 @@ EfficientNet-B2 + SVM classification + Grad-CAM heatmap + Grounding DINO boundin
 import os, warnings
 warnings.filterwarnings("ignore")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import numpy as np
 import streamlit as st
 import joblib
 from PIL import Image, ImageDraw, ImageFont
-import torch
 
 st.set_page_config(page_title="Solar Panel Dust Detection", page_icon="☀️", layout="centered")
 
@@ -51,8 +51,9 @@ def load_efficientnet():
     return full_model, preprocess_input
 
 
-@st.cache_resource(show_spinner="Loading Grounding DINO (zero-shot detector)...")
+@st.cache_resource(show_spinner="Loading Grounding DINO (dust detector)...")
 def load_grounding_dino():
+    import torch
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
     proc = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny")
     mdl = AutoModelForZeroShotObjectDetection.from_pretrained("IDEA-Research/grounding-dino-tiny")
@@ -80,6 +81,7 @@ def gradcam_overlay(conv, grad, img_size):
 BOX_COLORS = ["red", "orange", "#FFD700", "cyan", "magenta", "lime", "#FF69B4", "#00BFFF"]
 
 def detect_dust(image, threshold=0.15):
+    import torch
     proc, mdl = load_grounding_dino()
     text = "bird dropping. mud stain. leaf debris. dirt patch. dust spot."
     inputs = proc(images=image, text=text, return_tensors="pt")
@@ -94,7 +96,6 @@ def detect_dust(image, threshold=0.15):
     boxes = results["boxes"].numpy()
     labels_raw = results["labels"].tolist()
 
-    # Map label IDs to phrases
     tok = proc.tokenizer
     encoded = tok(text, return_tensors="pt")
     tokens = tok.convert_ids_to_tokens(encoded.input_ids[0].tolist())
@@ -119,16 +120,14 @@ def detect_dust(image, threshold=0.15):
         best = min(phrase_map.keys(), key=lambda k: abs(k - lid), default=None)
         labels.append(phrase_map.get(best, f"dust {lid}"))
 
-    # Filter: keep only boxes smaller than 50% of image area
     img_w, img_h = image.size
     img_area = img_w * img_h
     keep = []
-    for i in range(len(scores)):
-        x1, y1, x2, y2 = boxes[i]
+    for idx in range(len(scores)):
+        x1, y1, x2, y2 = boxes[idx]
         box_area = (x2 - x1) * (y2 - y1)
         if box_area < 0.5 * img_area:
-            keep.append(i)
-
+            keep.append(idx)
     if not keep:
         keep = list(range(len(scores)))
 
@@ -173,7 +172,6 @@ def analyze(image: Image.Image):
     dirty_idx = labels.index("dirty") if "dirty" in labels else len(probs) - 1
     dustiness = float(probs[dirty_idx]) * 100
 
-    # SVM gradient for Grad-CAM
     zs = scaler.transform(pooled.reshape(1, -1)).ravel()
     gamma = float(getattr(svm, "_gamma", svm.gamma) or (1.0 / zs.shape[0]))
     sv = svm.support_vectors_
@@ -185,7 +183,6 @@ def analyze(image: Image.Image):
 
     grad_overlay, grad_heatmap = gradcam_overlay(conv, grad, image.convert("RGB").size)
 
-    # Grounding DINO bounding boxes (small dirty spots only)
     det_scores, det_boxes, det_labels = detect_dust(image.convert("RGB"))
     boxed_img = draw_boxes(image.convert("RGB"), det_scores, det_boxes, det_labels)
     n_spots = len(det_scores)
@@ -234,7 +231,6 @@ if uploaded:
     with st.spinner("Running analysis..."):
         label, conf, dustiness, probs, grad_overlay, grad_heatmap, boxed_img, n_spots = analyze(img)
 
-    # Result header
     col_a, col_b = st.columns([1, 1])
     with col_a:
         if dustiness > 50:
@@ -253,7 +249,6 @@ if uploaded:
 
     st.divider()
 
-    # Grad-CAM
     st.subheader("🔍 Grad-CAM — Where the model looks")
     st.caption("Red/yellow = regions driving the 'dirty' decision. Blue = considered clean.")
     g1, g2 = st.columns(2)
@@ -264,10 +259,9 @@ if uploaded:
 
     st.divider()
 
-    # Bounding boxes
     st.subheader("📦 Bounding Boxes — Dust localization")
     if n_spots > 0:
-        st.caption(f"Grounding DINO found **{n_spots}** dirty spot(s) (bird droppings, mud, debris, dust patches).")
+        st.caption(f"Grounding DINO found **{n_spots}** dirty spot(s).")
         st.image(boxed_img, caption="Grounding DINO bounding boxes", use_container_width=True)
     else:
         st.success("No dirty spots detected — panel appears clean.")
