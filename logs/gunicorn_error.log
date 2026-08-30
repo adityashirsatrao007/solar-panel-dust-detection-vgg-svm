@@ -1,0 +1,60 @@
+[2026-08-30 00:08:51 +0530] [643302] [INFO] Starting gunicorn 26.2.0
+[2026-08-30 00:08:51 +0530] [643302] [INFO] Listening at: http://0.0.0.0:5001 (643302)
+[2026-08-30 00:08:51 +0530] [643302] [INFO] Using worker: sync
+[2026-08-30 00:08:51 +0530] [643506] [INFO] Booting worker with pid: 643506
+[2026-08-30 00:08:51 +0530] [643302] [INFO] Control socket listening at /home/aditya/.gunicorn/gunicorn.ctl
+[2026-08-30 00:08:55 +0530] [643302] [INFO] Handling signal: term
+[2026-08-30 00:08:55 +0530] [643506] [INFO] Worker exiting (pid: 643506)
+[2026-08-30 00:08:55 +0530] [643302] [INFO] Worker (pid:643506) was sent SIGTERM!
+[2026-08-30 00:08:55 +0530] [643302] [INFO] Shutting down: Master
+[2026-08-30 00:08:55 +0530] [644269] [INFO] Starting gunicorn 26.2.0
+[2026-08-30 00:08:55 +0530] [644269] [INFO] Listening at: http://0.0.0.0:5001 (644269)
+[2026-08-30 00:08:55 +0530] [644269] [INFO] Using worker: sync
+[2026-08-30 00:08:55 +0530] [644291] [INFO] Booting worker with pid: 644291
+[2026-08-30 00:08:55 +0530] [644269] [INFO] Control socket listening at /home/aditya/.gunicorn/gunicorn.ctl
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1788028744.041540  644291 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1788028744.046581  644291 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1788028744.058094  644291 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788028744.058126  644291 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788028744.058128  644291 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788028744.058129  644291 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+I0000 00:00:1788028747.169369  644291 gpu_device.cc:2019] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 2601 MB memory:  -> device: 0, name: NVIDIA GeForce GTX 1650 Ti, pci bus id: 0000:01:00.0, compute capability: 7.5
+2026-08-30 00:09:09,478 [INFO] RESPONSE GET /health -> 200
+[2026-08-30 00:59:50 +0530] [644269] [INFO] Handling signal: term
+[2026-08-30 00:59:50 +0530] [644291] [INFO] Worker exiting (pid: 644291)
+[app] Models loaded (lazy).
+[2026-08-30 00:59:51 +0530] [644269] [INFO] Shutting down: Master
+[2026-08-30 02:34:15 +0530] [779576] [INFO] Starting gunicorn 26.2.0
+[2026-08-30 02:34:15 +0530] [779576] [INFO] Listening at: http://0.0.0.0:5001 (779576)
+[2026-08-30 02:34:15 +0530] [779576] [INFO] Using worker: sync
+[2026-08-30 02:34:15 +0530] [779579] [INFO] Booting worker with pid: 779579
+[2026-08-30 02:34:15 +0530] [779576] [INFO] Control socket listening at /home/aditya/.gunicorn/gunicorn.ctl
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1788037461.560179  779579 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1788037461.565359  779579 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1788037461.576720  779579 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788037461.576761  779579 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788037461.576763  779579 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1788037461.576764  779579 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+I0000 00:00:1788037464.601116  779579 gpu_device.cc:2019] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 2601 MB memory:  -> device: 0, name: NVIDIA GeForce GTX 1650 Ti, pci bus id: 0000:01:00.0, compute capability: 7.5
+2026-08-30 02:34:26,758 [INFO] RESPONSE GET /health -> 200
+2026-08-30 02:34:34,105 [INFO] REQUEST POST /analyze from 127.0.0.1
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1788037476.141368  779793 service.cc:152] XLA service 0x708af0015660 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+I0000 00:00:1788037476.141412  779793 service.cc:160]   StreamExecutor device (0): NVIDIA GeForce GTX 1650 Ti, Compute Capability 7.5
+I0000 00:00:1788037477.196196  779793 cuda_dnn.cc:529] Loaded cuDNN version 90300
+I0000 00:00:1788037481.859596  779793 device_compiler.h:188] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+2026-08-30 02:34:41,921 [INFO] RESPONSE POST /analyze -> 200
+2026-08-30 02:34:41,929 [INFO] REQUEST POST /analyze from 127.0.0.1
+2026-08-30 02:34:42,049 [INFO] RESPONSE POST /analyze -> 200

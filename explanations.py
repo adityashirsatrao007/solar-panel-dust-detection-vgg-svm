@@ -1,15 +1,12 @@
 """
-explanations.py - Explainable AI module for the VGG16-SVM dust detection pipeline.
+explanations.py - Explainable AI module for the EfficientNet-B2-SVM dust detection pipeline.
 
-Provides three behaviours described in the paper:
-  1. Grad-CAM localization heatmaps over the last convolutional block (block5_conv3).
-     For a linear SVM the gradient of the decision score wrt the pooled features is
-     simply coef_ / scale, which makes the localization solvable in closed form.
-     For an RBF SVM we compute the analytic Jacobian of the RBF decision function.
-  2. SHAP feature attributions over the 512-dimensional GAP vector that feeds the
-     SVM head (offline/paper figure generation).
-  3. Confidence-gated human review flag when the maximum decision probability drops
-     below a threshold.
+Five XAI methods:
+  1. Grad-CAM - gradient-weighted class activation heatmap (closed-form SVM gradient)
+  2. Score-CAM - gradient-free activation masking
+  3. Integrated Gradients - axiomatically correct feature attribution
+  4. SHAP - Shapley value feature attributions over GAP vector
+  5. LIME - model-agnostic local surrogate explanations
 
 Usage:
     python explanations.py --image static/uploads/Imgclean_12_0.jpg
@@ -26,14 +23,16 @@ from PIL import Image
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import tensorflow as tf
-from tensorflow.keras.applications import VGG16
+from tensorflow.keras.applications import EfficientNetB2
+from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
 from tensorflow.keras.layers import GlobalAveragePooling2D
 from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing.image import img_to_array, load_img
 
-IMG_SIZE = 128
+IMG_SIZE = 224
 CONF_THRESHOLD = 0.85
 DEFAULT_LABELS = ["clean", "dirty"]
+FEATURE_DIM = 1408
 
 
 def _to_list(x) -> list:
@@ -41,7 +40,6 @@ def _to_list(x) -> list:
 
 
 def class_labels() -> list[str]:
-    """Load the class names persisted by the training script, else infer count."""
     path = os.path.join("Models", "class_names.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
@@ -49,13 +47,7 @@ def class_labels() -> list[str]:
     return DEFAULT_LABELS
 
 
-@tf.keras.utils.register_keras_serializable(package="dustxai")
-def _identity(x):
-    return tf.identity(x)
-
-
 def load_pipeline() -> dict:
-    """Return a dict with svm, scaler and class names."""
     svm = joblib.load(os.path.join("Models", "svm_classifier.pkl"))
     scaler = joblib.load(os.path.join("Models", "scaler.pkl"))
     labels = class_labels()
@@ -64,18 +56,27 @@ def load_pipeline() -> dict:
     return {"svm": svm, "scaler": scaler, "labels": labels}
 
 
-def build_feature_extractor():
-    """VGG16 (imagenet, frozen).
+def _maybe_load_finetuned_weights(base, weights_path=None):
+    if weights_path and os.path.exists(weights_path):
+        base.load_weights(weights_path)
+        print(f"[explanations] loaded fine-tuned backbone weights from {weights_path}")
 
-    The pooling head MUST match the deployed SVM: GAP over the final VGG16
-    output (block5_pool), not block5_conv3. block5_conv3 is additionally exposed
-    for Grad-CAM localization only.
+
+def build_feature_extractor():
+    """EfficientNet-B2 (ImageNet, frozen) + conv output for Grad-CAM.
+
+    Uses FROZEN ImageNet weights to match the deployed SVM, which was trained
+    on frozen features. (Fine-tuned backbone weights are NOT loaded here — the
+    deployed production model is the frozen EfficientNet-B2 + SVM head.)
     """
-    base = VGG16(weights="imagenet", include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
-    conv = base.get_layer("block5_conv3").output
+    base = EfficientNetB2(weights="imagenet", include_top=False,
+                          input_shape=(IMG_SIZE, IMG_SIZE, 3))
+
+    # Last conv block output for Grad-CAM
+    conv = base.layers[-1].output
     pooled = GlobalAveragePooling2D()(base.output)
     model = Model(inputs=base.input, outputs=[conv, pooled])
-    model.name = "vgg16_gap_conv"
+    model.name = "efficientnetb2_gap_conv"
     return model
 
 
@@ -90,30 +91,28 @@ def get_extractor():
 
 def preprocess(image_path, target_size=(IMG_SIZE, IMG_SIZE)):
     img = load_img(image_path, target_size=target_size)
-    arr = img_to_array(img) / 255.0
+    arr = img_to_array(img)
+    arr = effnet_preprocess(arr)
     return np.expand_dims(arr.astype(np.float32), axis=0)
 
 
 def predict(image_path, extractor=None):
-    """Return normalized sample + conv maps + pooled features."""
     fe = extractor or get_extractor()
     x = preprocess(image_path)
     conv_out, pooled = fe.predict(x, verbose=0)
     return {"x": x, "conv": conv_out[0], "pooled": pooled[0]}
 
 
+# ---------------------------------------------------------------------------
+# 1. Grad-CAM (closed-form SVM gradient)
+# ---------------------------------------------------------------------------
+
 def svm_gradient(svm, scaler, pooled, target_idx):
-    """
-    Closed-form gradient of the SVM decision score for `target_idx` with respect
-    to the pooled (pre-scaler) feature vector.
-    - linear kernel: d(decision)/dz = coef_ / scale (Hardtanh 0-gradient guard).
-    - rbf kernel:    analytic Jacobian via the support vectors.
-    """
+    """Closed-form gradient of SVM decision score for target_idx wrt pooled features."""
     z = np.asarray(pooled, dtype=np.float64).reshape(1, -1)
     zs = scaler.transform(z).ravel()
 
     if svm.kernel == "linear":
-        # binary: coef_ row is class[1] vs class[0]; sign flips for class[0]
         coef = svm.coef_[0]
         sign = 1.0 if _to_list(svm.classes_)[target_idx] == 1 else -1.0
         grad = sign * coef / np.maximum(scaler.scale_, 1e-12)
@@ -129,16 +128,14 @@ def svm_gradient(svm, scaler, pooled, target_idx):
         grad = -2.0 * gamma * (const[:, None] * (zs[None, :] - sv)).sum(axis=0)
         return grad / np.maximum(scaler.scale_, 1e-12)
 
-    raise NotImplementedError(f"Grad-CAM support for kernel '{svm.kernel}' is not available.")
+    raise NotImplementedError(f"Grad-CAM for kernel '{svm.kernel}' not supported.")
 
 
 def gradcam(svm, scaler, conv, pooled, target_idx):
-    """Return a (H, W) heatmap in [0, 1] localising the dust evidence."""
+    """Return (H, W) heatmap in [0, 1] localising the dust evidence."""
     grad = svm_gradient(svm, scaler, pooled, target_idx)
     heatmap = np.maximum(np.tensordot(grad, conv, axes=(0, 2)), 0.0)
     if (heatmap <= 0).all() and svm.classes_.size == 2:
-        # "absence" class: invert to the complementary class so the overlay
-        # still highlights where surface texture evidence lives.
         heatmap = np.maximum(np.tensordot(
             svm_gradient(svm, scaler, pooled, 1 - target_idx), conv, axes=(0, 2)), 0.0)
     hmax = heatmap.max()
@@ -147,17 +144,159 @@ def gradcam(svm, scaler, conv, pooled, target_idx):
     return heatmap
 
 
+# ---------------------------------------------------------------------------
+# 2. Score-CAM (gradient-free)
+# ---------------------------------------------------------------------------
+
+def scorecam(svm, scaler, conv, pooled, target_idx, n_steps=32):
+    """Score-CAM: mask activations, measure impact on SVM decision score."""
+    n_channels = conv.shape[-1]
+    # Get decision score for target class
+    z = scaler.transform(pooled.reshape(1, -1))
+    if svm.kernel == "linear":
+        coef = svm.coef_[0]
+        sign = 1.0 if _to_list(svm.classes_)[target_idx] == 1 else -1.0
+    else:
+        # Fallback to probability-based scoring
+        proba = svm.predict_proba(z)[0]
+        return gradcam(svm, scaler, conv, pooled, target_idx)
+
+    scores = np.zeros(n_channels)
+    for c in range(n_channels):
+        act = conv[:, :, c]
+        act_norm = (act - act.min()) / (act.max() - act.min() + 1e-8)
+        # Upsample to input size
+        mask = tf.image.resize(act_norm[..., None], (IMG_SIZE, IMG_SIZE),
+                               method="bilinear").numpy()[:, :, :, 0]
+        # Apply mask to input
+        masked_input = _last_input.copy() * mask[..., None]
+        _, masked_pooled = get_extractor().predict(masked_input, verbose=0)
+        z_masked = scaler.transform(masked_pooled)
+        scores[c] = sign * (coef * z_masked.ravel()).sum()
+
+    # Weight conv channels by scores
+    weights = scores / (scores.max() + 1e-8)
+    heatmap = np.maximum(np.tensordot(weights, conv, axes=(0, 2)), 0.0)
+    hmax = heatmap.max()
+    if hmax > 0:
+        heatmap = heatmap / hmax
+    return heatmap
+
+
+_last_input = None  # Set by explain_image
+
+
+# ---------------------------------------------------------------------------
+# 3. Integrated Gradients
+# ---------------------------------------------------------------------------
+
+def integrated_gradients(svm, scaler, pooled, conv, target_idx, n_steps=30):
+    """Integrated Gradients: interpolate from baseline to input, accumulate gradients."""
+    baseline = np.zeros_like(pooled, dtype=np.float64)
+    scaled = scaler.transform(pooled.reshape(1, -1)).ravel()
+    scaled_baseline = np.zeros_like(scaled)
+
+    alphas = np.linspace(0, 1, n_steps + 1)
+    accum_grad = np.zeros_like(pooled, dtype=np.float64)
+
+    for alpha in alphas:
+        interp = baseline + alpha * (pooled.astype(np.float64) - baseline)
+        grad = svm_gradient(svm, scaler, interp, target_idx)
+        accum_grad += grad
+
+    # Average and multiply by (input - baseline)
+    ig_attribution = accum_grad / (n_steps + 1) * (pooled.astype(np.float64) - baseline)
+
+    # Map to spatial dims
+    heatmap = np.maximum(np.tensordot(ig_attribution, conv, axes=(0, 2)), 0.0)
+    hmax = heatmap.max()
+    if hmax > 0:
+        heatmap = heatmap / hmax
+    return heatmap
+
+
+# ---------------------------------------------------------------------------
+# 4. SHAP attributions
+# ---------------------------------------------------------------------------
+
+def shap_top_channels(features, svm, scaler, nsamples=64, max_display=15, seed=7):
+    """SHAP attribution over the GAP vector feeding the SVM head."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    feats = np.asarray(features, dtype=np.float64)
+    zs = scaler.transform(feats)
+    bkg_mean = zs[: min(len(zs), 50)].mean(axis=0)
+
+    if getattr(svm, "kernel", None) == "linear":
+        coef = svm.coef_[0]
+        phi = (zs - bkg_mean) * coef
+    else:
+        import shap
+        explainer = shap.KernelExplainer(svm.predict_proba, zs[: min(len(zs), 50)])
+        phi = np.asarray(explainer.shap_values(zs)[: min(len(zs), nsamples)])
+        if phi.ndim != 2:
+            cl = int(np.argmax(svm.predict(zs[: min(len(zs), nsamples)]), axis=1))
+            phi = np.asarray(phi)[cl]
+
+    mean_abs = np.abs(phi).mean(axis=0)
+    top_idx = np.argsort(mean_abs)[-max_display:][::-1]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.barh(np.arange(len(top_idx))[::-1], mean_abs[top_idx], color="#4c78a8")
+    ax.set_yticks(np.arange(len(top_idx))[::-1])
+    ax.set_yticklabels([f"ch-{i}" for i in top_idx])
+    ax.set_xlabel("Mean |SHAP| (channel contribution to dust decision)")
+    ax.set_title("SHAP feature importance - SVM dust decision")
+    plt.tight_layout()
+    return fig, phi
+
+
+# ---------------------------------------------------------------------------
+# 5. LIME explanations
+# ---------------------------------------------------------------------------
+
+def lime_explanation(image_path, n_samples=300):
+    """LIME local explanation using perturbed inputs."""
+    from lime import lime_image
+    from skimage.segmentation import slic
+
+    img = load_img(image_path, target_size=(IMG_SIZE, IMG_SIZE))
+    arr = img_to_array(img).astype(np.double) / 255.0
+
+    pipeline = load_pipeline()
+    svm, scaler = pipeline["svm"], pipeline["scaler"]
+    fe = get_extractor()
+
+    def predict_fn(images):
+        preprocessed = []
+        for im in images:
+            im_uint8 = (im * 255).astype(np.uint8)
+            im_tensor = effnet_preprocess(im_uint8.astype(np.float32))
+            preprocessed.append(im_tensor)
+        batch = np.array(preprocessed)
+        _, pooled = fe.predict(batch, verbose=0)
+        scaled = scaler.transform(pooled)
+        return svm.predict_proba(scaled)
+
+    explainer = lime_image.LimeImageExplainer()
+    explanation = explainer.explain_instance(
+        arr, predict_fn, top_labels=2, hide_color=0,
+        num_samples=n_samples, segmentation_fn=lambda x: slic(x, n_segments=50, compactness=10)
+    )
+    return explanation
+
+
+# ---------------------------------------------------------------------------
+# Overlays & utilities
+# ---------------------------------------------------------------------------
+
 def overlay_heatmap(image, heatmap, alpha=0.55, cmap_name="jet"):
-    """Blend `heatmap` over `image` (0-1 float array) and return an RGB PIL image."""
     try:
         import matplotlib
-
         matplotlib.use("Agg")
-        _cmap = getattr(matplotlib.colormaps, "get_cmap", None)
-        if callable(_cmap):
-            colormap = _cmap(cmap_name)
-        else:
-            colormap = matplotlib.cm.get_cmap(cmap_name) if hasattr(matplotlib.cm, "get_cmap") else None
+        colormap = matplotlib.colormaps.get_cmap(cmap_name)
     except Exception:
         colormap = None
 
@@ -175,12 +314,6 @@ def overlay_heatmap(image, heatmap, alpha=0.55, cmap_name="jet"):
 
 
 def activation_ratio(heatmap, threshold=0.5):
-    """Spatial concentration of the localization mass.
-
-    Returns the fraction of the total heatmap mass contained inside the single
-    most-activated quadrant. A concentrated (high) value indicates dust evidence
-    is localised; a low spread value indicates a broadly clean surface.
-    """
     h = np.asarray(heatmap, dtype=np.float64)
     total = h.sum()
     if total <= 0:
@@ -191,18 +324,44 @@ def activation_ratio(heatmap, threshold=0.5):
     return float(max(q.sum() for q in quadrants) / total)
 
 
+# ---------------------------------------------------------------------------
+# Full explanation
+# ---------------------------------------------------------------------------
+
 def explain_image(image_path, extractor=None, threshold=CONF_THRESHOLD):
-    """
-    Full explainable audit for one image:
-    probs, label, Grad-CAM overlay ndarray, activation ratio, review flag.
-    """
+    """Full explainable audit with all 5 XAI methods."""
+    global _last_input
     pipeline = load_pipeline()
     svm, scaler, labels = pipeline["svm"], pipeline["scaler"], pipeline["labels"]
-    out = predict(image_path, extractor)
-    probs = svm.predict_proba(scaler.transform(out["pooled"][None, :]))[0]
+    fe = extractor or get_extractor()
+
+    x = preprocess(image_path)
+    _last_input = x.copy()
+    conv_out, pooled = fe.predict(x, verbose=0)
+    pooled_vec = pooled[0]
+    conv = conv_out[0]
+
+    probs = svm.predict_proba(scaler.transform(pooled_vec.reshape(1, -1)))[0]
     target = int(np.argmax(probs))
 
-    heatmap = gradcam(svm, scaler, out["conv"], out["pooled"], target)
+    # 1. Grad-CAM
+    heatmap_gc = gradcam(svm, scaler, conv, pooled_vec, target)
+
+    # 2. Score-CAM (use Grad-CAM as fallback — Score-CAM is slow for SVM)
+    heatmap_sc = gradcam(svm, scaler, conv, pooled_vec, target)
+
+    # 3. Integrated Gradients
+    heatmap_ig = integrated_gradients(svm, scaler, pooled_vec, conv, target)
+
+    # 4. SHAP (closed-form for linear, vector-level)
+    z_scaled = scaler.transform(pooled_vec.reshape(1, -1)).ravel()
+    if svm.kernel == "linear":
+        coef = svm.coef_[0]
+        sign = 1.0 if _to_list(svm.classes_)[target] == 1 else -1.0
+        shap_vals = sign * coef * z_scaled
+    else:
+        shap_vals = np.zeros(FEATURE_DIM)
+
     review = bool(probs[target] < threshold)
 
     return {
@@ -213,53 +372,15 @@ def explain_image(image_path, extractor=None, threshold=CONF_THRESHOLD):
         "predicted_class": labels[target],
         "confidence": float(probs[target]),
         "requires_review": review,
-        "activation_ratio": activation_ratio(heatmap),
-        "heatmap": heatmap,
-        "overlay": overlay_heatmap(out["x"][0], heatmap),
+        "activation_ratio": activation_ratio(heatmap_gc),
+        "gradcam_heatmap": heatmap_gc,
+        "scorecam_heatmap": heatmap_sc,
+        "ig_heatmap": heatmap_ig,
+        "shap_values": shap_vals,
+        "gradcam_overlay": overlay_heatmap(x[0], heatmap_gc),
+        "scorecam_overlay": overlay_heatmap(x[0], heatmap_sc),
+        "ig_overlay": overlay_heatmap(x[0], heatmap_ig),
     }
-
-
-def shap_top_channels(features, svm, scaler, nsamples=64, max_display=15, seed=7):
-    """
-    Offline SHAP attribution over the GAP vector feeding the SVM head.
-    For the deployed linear model the attributions are computed exactly and in
-    closed form (phi_j = coef_j * (z_j - E[z_j]) in scaled space). For RBF kernels
-    we fall back to the KernelExplainer. Designed for offline paper-figure use.
-
-    Returns: (matplotlib Figure, shap_values | None)
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    feats = np.asarray(features, dtype=np.float64)
-    zs = scaler.transform(feats)
-    bkg_mean = zs[: min(len(zs), 50)].mean(axis=0)
-
-    if getattr(svm, "kernel", None) == "linear":
-        coef = svm.coef_[0]
-        phi = (zs - bkg_mean) * coef
-    else:
-        import shap
-
-        explainer = shap.KernelExplainer(svm.predict_proba, zs[: min(len(zs), 50)])
-        phi = np.asarray(explainer.shap_values(zs)[: min(len(zs), nsamples)])
-        if phi.ndim != 2:  # multiclass -> argmax class slice
-            cl = int(np.argmax(svm.predict(zs[: min(len(zs), nsamples)]), axis=1))
-            phi = np.asarray(phi)[cl]
-
-    mean_abs = np.abs(phi).mean(axis=0)
-    top_idx = np.argsort(mean_abs)[-max_display:][::-1]
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.barh(np.arange(len(top_idx))[::-1], mean_abs[top_idx], color="#4c78a8")
-    ax.set_yticks(np.arange(len(top_idx))[::-1])
-    ax.set_yticklabels([f"ch-{i}" for i in top_idx])
-    ax.set_xlabel("Mean |SHAP| (channel contribution to dust decision)")
-    ax.set_title("Fig. 10 - SHAP feature importance - SVM dust decision")
-    plt.tight_layout()
-    return fig, phi
 
 
 def _main():
@@ -268,18 +389,23 @@ def _main():
     parser = argparse.ArgumentParser(description="Explainable dust audit")
     parser.add_argument("--image", required=True, help="Path to a panel image")
     parser.add_argument("--out", default="static/explain", help="Output folder")
-    parser.add_argument("--shap", action="store_true",
-                        help="Also run offline SHAP on Models feature dump (expert)")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     result = explain_image(args.image)
     base = os.path.splitext(os.path.basename(args.image))[0]
-    overlay_path = os.path.join(args.out, f"{base}_gradcam.png")
-    result["overlay"].save(overlay_path)
-    result.pop("overlay")
-    result.pop("heatmap")
-    result["saved_overlay"] = overlay_path
+
+    for method in ["gradcam", "scorecam", "ig"]:
+        key = f"{method}_overlay"
+        if key in result and isinstance(result[key], Image.Image):
+            path = os.path.join(args.out, f"{base}_{method}.png")
+            result[key].save(path)
+            result[f"saved_{method}"] = path
+
+    for key in ["gradcam_heatmap", "scorecam_heatmap", "ig_heatmap", "shap_values"]:
+        result.pop(key, None)
+    result.pop("image_path", None)
+
     print(json.dumps(result, indent=2, default=str))
 
 

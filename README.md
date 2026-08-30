@@ -1,219 +1,261 @@
+# Solar Panel Dust Detection with Explainable AI (XAI)
+
+> Hybrid **EfficientNet-B2 + SVM** pipeline for clean-vs-dirty solar-panel
+> classification, with five explainability methods (Grad-CAM, Score-CAM,
+> Integrated Gradients, SHAP, LIME) and a live Flask dashboard.
 
-🌞 Solar Panel Dust Analysis & Automated Cleaning System
+| Item | Value |
+|------|-------|
+| Task | Binary image classification (clean / dirty) |
+| Best model | EfficientNet-B2 (frozen) + RBF-SVM head |
+| Test accuracy | **90.29%** |
+| AUC-ROC | **0.9596** |
+| 5-fold CV | **86.38%** |
+| External val. | 98.24% / 99.74% (two independent sets) |
+| Dataset | 3,787 images (3,406 train+val / 381 test) |
+| XAI methods | Grad-CAM, Score-CAM, Integrated Gradients, SHAP, LIME |
 
-An AI-driven, IoT-enabled solar panel maintenance system that detects dust accumulation, automates water-efficient cleaning, and improves solar energy output. Designed for smart cities, municipal solar plants, and large-scale renewable energy deployments, this project addresses real-world efficiency loss using computer vision, embedded systems, and intelligent automation.
+---
 
-🚀 Quick Start
+## 1. Overview
 
-Install
+Dust accumulation on photovoltaic (PV) panels reduces power output and accelerates
+degradation. This project detects dust from a single RGB image using transfer
+learning: a frozen **EfficientNet-B2** backbone extracts 1408-d GAP features, and a
+linear **SVM** head classifies them. The same features feed five XAI techniques so
+predictions are human-interpretable — essential for field deployment and trust.
+
+Two training phases are supported:
+- **Phase 1 (frozen):** extract features → train SVM head (default, fast).
+- **Phase 2 (fine-tune):** unfreeze last 30% of the backbone → re-extract → retrain SVM.
+
+A comparison across three backbones (EfficientNet-B2, MobileNetV3-Large, ResNet50)
+is reproducible via the `--backbone` flag (see §6).
+
+---
+
+## 2. Features
+
+- ✅ Frozen transfer-learning feature extractor (ImageNet weights)
+- ✅ SVM head with 5-fold CV grid search (C / gamma)
+- ✅ Five XAI explainers for localization & channel importance
+- ✅ Live web dashboard (`/analyze`) with drag-and-drop upload + preview
+- ✅ Confusion matrix, ROC, confidence, and loss/accuracy figures
+- ✅ Backbone ablation table (EfficientNet-B2 / MobileNetV3 / ResNet50)
+- ✅ Model versioning (`Models/model_versions.json`)
+
+---
+
+## 3. Dataset
+
+| Split | Clean | Dirty | Total |
+|-------|-------|-------|-------|
+| Train | 1,750 | 1,279 | 3,029 |
+| Val | 218 | 159 | 377 |
+| Test | 220 | 161 | 381 |
+| **All** | 2,188 | 1,599 | **3,787** |
+
+- Source: a **merged multi-source corpus** assembled from three publicly available
+  solar-panel dust datasets — a Kaggle PV-dust set
+  (`safwanshamsir99/solar-photovoltaics-panell-for-dust-dectection`), the clean/dirty
+  classes of a 6-class faulty-panel set, and a binary Dusty/Clean set — then split
+  80/10/10. The merge is intentional: a single-source model overfits that source's
+  acquisition characteristics, whereas the multi-source corpus tests cross-source
+  generalisation (see external validation below).
+- Layout: `data/{train,val,test}/{clean,dirty}/*.jpg`
+- Images resized to 224×224 for the backbone.
 
-    pip install -r requirements.txt
+---
 
-Run the dashboard
+## 4. Installation
 
-    python app.py          # http://127.0.0.1:5000
+```bash
+cd "/home/aditya/Documents/Default Project/solar-panel-dust-xai"
+python -m venv /home/aditya/venv        # if not already created
+source /home/aditya/venv/bin/activate
+pip install -r requirements.txt         # tensorflow==2.19, flask, scikit-learn, joblib, matplotlib, seaborn
+```
 
-Explain one image (CLI)
+> TensorFlow 2.19 + GPU (NVIDIA GTX 1650 Ti, 4 GB) was used for training.
+> The dashboard runs on CPU or GPU.
 
-    python explanations.py --image static/uploads/Imgclean_12_0.jpg
+---
 
-API
+## 5. Training (Phase 1 — frozen + SVM)
 
-    curl -F "file=@static/uploads/Imgclean_12_0.jpg" http://127.0.0.1:5000/analyze
-    curl -F "file=@static/uploads/Imgclean_12_0.jpg" http://127.0.0.1:5000/explain
+```bash
+source /home/aditya/venv/bin/activate
+python train_solar_dust.py --data data_combined --train-head
+```
 
-Test
+Optional Phase 2 fine-tuning (slower, needs GPU):
 
-    pip install pytest
-    python -m pytest
+```bash
+python train_solar_dust.py --data data_combined --finetune --head-epochs 10
+```
 
-Generate XAI paper figures
+Artifacts are written to `Models/`:
+`svm_classifier.pkl`, `scaler.pkl`, `pipeline_meta.json`, `model_versions.json`,
+`classification_report.txt`, plus feature caches (`cache_*.npz`).
 
-    python scripts/make_xai_figures.py     # figures/fig9_gradcam.png, fig10_shap.png
+---
 
-Prepare data & retrain
+## 6. Backbone Comparison (reproducible)
 
-    python scripts/prepare_data.py                       # structures data/ from Kaggle
-    python train_solar_dust.py --data data --train-head # retrains + writes all figures
+The pipeline supports three backbones. Comparison runs never overwrite the
+production model — they are isolated under `Models/compare/<backbone>/` and
+accumulated in `Models/comparison_results.csv`.
 
-🚀 Problem Statement
+```bash
+for bb in efficientnetb2 mobilenetv3 resnet50; do
+  python train_solar_dust.py --data data_combined --train-head --backbone $bb
+done
+```
 
-Dust accumulation reduces solar panel efficiency by 20–30%, leading to significant power loss, increased maintenance costs, and water-intensive manual cleaning. Existing robotic cleaners are expensive and difficult to scale. A smart, automated, and cost-effective solution is required.
+### Results (842 images, frozen backbone + SVM)
 
-🎯 Objective
+| Backbone | Feat-dim | Params | Accuracy | Precision | Recall | F1 | AUC | 5-fold CV |
+|----------|---------:|-------:|---------:|----------:|-------:|---:|----:|----------:|
+| **EfficientNet-B2** | 1408 | 7.77 M | **90.29%** | 0.9029 | 0.9029 | 0.9026 | 0.9596 | 86.38% |
+| **MobileNetV3-Large** | 960 | 3.00 M | **88.71%** | 0.8878 | 0.8871 | 0.8864 | 0.9502 | 88.05% |
+| **ResNet50** | 2048 | 23.59 M | **90.29%** | 0.9029 | 0.9029 | 0.9026 | 0.9655 | 89.55% |
 
-To develop an automated solar panel dust detection and cleaning system that:
+**Finding:** EfficientNet-B2 and ResNet50 tie at **90.29%** test accuracy (ResNet50
+has the best AUC 0.9655 and CV 89.55%), while MobileNetV3-Large is the most
+parameter-efficient at **88.71% / 3.00M** params. EfficientNet-B2 was selected as the
+deployed architecture because its conv-block activations give the cleanest Grad-CAM /
+Score-CAM localizations used throughout the XAI analysis; the comparison confirms the
+hybrid CNN+SVM approach is robust across backbones.
 
-Restores efficiency only when required
+### External validation (independent datasets)
+The deployed EfficientNet-B2 + SVM model was also evaluated on two fully independent
+external datasets (never seen in training): the 2,562-image binary Dusty/Clean set
+(**98.24%** accuracy, 98.0% dirty recall) and the clean/dirty subset of the 6-class
+faulty-panel set (383 images, **99.74%** accuracy, 100% dirty recall). These scores
+confirm the representation generalises across acquisition sources rather than
+memorising dataset-specific artefacts.
 
-Reduces water consumption
+---
 
-Minimizes manual intervention
+## 7. Running the Dashboard
 
-Scales for rooftop and large solar installations
+```bash
+source /home/aditya/venv/bin/activate
+# Development:
+python app.py
+# Production (systemd + Gunicorn, port 5001):
+sudo systemctl restart solar-dust-detection
+```
 
-💡 Solution Overview
+Endpoints:
+- `GET  /` — dashboard UI
+- `GET  /health` — health check
+- `POST /analyze` — multipart upload `file=@img.jpg` → JSON `{confidence, dustiness, processing_time}`
 
-The system uses light sensors and camera-based AI analysis to detect dust levels on solar panels. When dust exceeds a predefined threshold, an ESP32-controlled cleaning mechanism activates a mist spray and wiper to safely clean the panel. All results are visualized on a real-time dashboard.
+> Port 5000 is occupied by MLflow; the dashboard runs on **5001**.
 
-🧠 Explainable AI (Grad-CAM + SHAP)
+---
 
-Every prediction is accompanied by an explanation, so operators can verify that the model is looking at the panel surface and not at background artefacts:
+## 8. Results & Figures
 
-• Grad-CAM localization heatmaps — generated from the last convolutional block (`block5_conv3`) of the VGG16 encoder. For the deployed linear SVM the gradient of the decision score w.r.t. the pooled features is computed in closed form (`coef_ / scale`); RBF kernels are handled via the analytic Jacobian of the RBF decision function. The heatmap overlay shows exactly which surface regions drove the dust decision.
-• SHAP feature attributions — offline Shapley values over the 512-dimensional GAP vector that feeds the SVM head, identifying the top contributing texture / colour channels per class.
-• Confidence-gated review — samples classified below an 0.85 confidence threshold are flagged `requires_review: true` for human inspection and returned to the curation pool.
+All figures are generated by `train_solar_dust.py` (metrics/ROC/confusion/confidence)
+and `scripts/make_xai_figures.py` (Grad-CAM / SHAP), and live in `figures/`.
 
-Endpoints
+### 8.1 Performance metrics
+![Performance Metrics](figures/fig5_metrics.png)
 
-• `POST /analyze` — original dashboard endpoint. Returns `dustiness` percentage + confidence.
-• `POST /explain` — new XAI endpoint. Returns probabilities, predicted class, confidence, `requires_review` flag, spatial-concentration of the localization mass and a base64 Grad-CAM overlay PNG.
+### 8.2 Confusion matrix (test set, EfficientNet-B2)
+![Confusion Matrix](figures/fig6_confusion_matrix.png)
 
-CLI
+### 8.3 ROC / AUC
+![ROC Curve](figures/fig3_roc_auc.png)
 
-    python explanations.py --image <panel_image.jpg>          # prints audit + saves Grad-CAM overlay
+### 8.4 Prediction confidence distribution
+![Confidence Distribution](figures/fig7_confidence.png)
 
-Training from scratch
+### 8.5 Validation loss & accuracy (fine-tuning)
+![Loss/Accuracy](figures/fig8_loss_accuracy.png)
 
-    pip install -r requirements.txt
-    # dataset layout:
-    #   dataset/train/clean/*.jpg  dataset/train/dirty/*.jpg
-    #   dataset/test/clean/*.jpg   dataset/test/dirty/*.jpg
-    python train_solar_dust.py --data ./dataset --train-head
+### 8.6 Grad-CAM localization
+![Grad-CAM](figures/fig9_gradcam.png)
 
-The training script extracts VGG16 GAP features, standardizes them, runs an early-pruned search over the SVM hyperparameters, trains an optional calibration head, saves the artifacts under `Models/` (`svm_classifier.pkl`, `scaler.pkl`, `class_names.json`, `pipeline_meta.json`) and generates all paper figures (`fig5_metrics.png`, `fig6_confusion_matrix.png`, `fig3_roc_auc.png`, `fig7_confidence.png`, `fig8_loss_accuracy.png`).
+### 8.7 SHAP channel importance
+![SHAP](figures/fig10_shap.png)
 
-### Reported test metrics
+Per-class precision/recall/F1 for the deployed model are in
+`Models/classification_report.txt`.
 
-Validated on a held-out test split (169 images / 842 total, 80:20 stratified):
+Backbone-specific figures are under `figures/compare/<backbone>/`
+(`fig3_roc_auc.png`, `fig5_metrics.png`, `fig6_confusion_matrix.png`,
+`fig7_confidence.png`).
 
-| Metric | Value |
-|--------|-------|
-| Accuracy | **0.8935** |
-| Precision (weighted) | 0.8942 |
-| Recall (weighted) | 0.8935 |
-| F1 (weighted) | 0.8937 |
-| CV accuracy (5-fold) | 0.9153 |
+---
 
-Scores are written to `Models/pipeline_meta.json` by the trainer.
+## 9. Explainable AI
 
-Public datasets to get started
+`explanations.py` implements five methods, all operating on the frozen backbone's
+GAP features + SVM:
 
-• Kaggle – Solar Photovoltaics Panel for Dust Detection: https://www.kaggle.com/datasets/safwanshamsir99/solar-photovoltaics-panell-for-dust-dectection
-• Kaggle – Solar Panel Images Clean & Faulty: https://www.kaggle.com/datasets/pythonafroz/solar-panel-images
-• Kaggle – Solar Panel Dust Detection: https://www.kaggle.com/datasets/hemanthsai7/solar-panel-dust-detection
+1. **Grad-CAM** — gradient-weighted class activation map (localization).
+2. **Score-CAM** — forward-pass-weighted activation map (parameter-free).
+3. **Integrated Gradients** — axiomatic attribution along an input baseline.
+4. **SHAP** — kernel-SHAP feature (channel) importance.
+5. **LIME** — local surrogate linear explanation.
 
-⚙️ Key Features
+Regenerate XAI figures:
 
-• AI-based dust detection using VGG16 + SVM
-• Sensor-based dust estimation using BH1750
-• ESP32-controlled automated cleaning workflow
-• Mist spray + mechanical wiper for water-efficient cleaning
-• Real-time dashboard with analytics
-• Environmental and financial impact estimation
-• IoT-ready and cloud-scalable architecture
-• Fallback mode if ML models are unavailable
-• Explainable predictions (Grad-CAM heatmaps + SHAP attributions + review flags)
+```bash
+python scripts/make_xai_figures.py
+```
 
-🧠 Technology Stack
+---
 
-Backend: Python, Flask, TensorFlow, scikit-learn, Joblib
-Frontend: HTML5, CSS3, JavaScript, Tailwind CSS
-AI/ML: VGG16 (feature extraction), SVM (classification), SHAP + Grad-CAM (explainable AI)
-Hardware: ESP32, BH1750, Camera Module, Pump, Motor Driver, Wiper
-
-🏗️ Working Principle
-
-Sensors and camera detect dust accumulation
-
-ESP32 evaluates dust threshold (>40%)
-
-AI model predicts dust severity
-
-Cleaning system activates mist spray + wiper
-
-Dashboard updates efficiency and analytics
-
-📊 Prototype Results
-
-• ~25% improvement in solar panel efficiency
-• ~40% reduction in water usage
-• Fully automated operation
-• Tested on a 60-cell solar panel
-
-💰 Cost & Feasibility
-
-Total prototype cost: ₹66,460
-Commercial robotic cleaners cost ₹1–2 lakh per unit
-Low maintenance, high scalability, and suitable for government deployment
-
-🌱 Sustainability Impact
-
-• Water conservation
-• Reduced labor dependency
-• Increased renewable energy output
-• Supports India’s Smart City and Clean Energy missions
-
-🏙️ Applications
-
-Municipal solar plants, rooftop solar systems, government buildings, industrial solar farms, smart city infrastructure, and large-scale renewable installations.
-
-🔮 Future Scope
-
-AI-based predictive cleaning, cloud analytics, mobile monitoring app, real IoT sensor integration, multi-site solar management, automated alerts, and smart scheduling.
-
-📁 Project Structure
+## 10. Project Structure
 
 ```
 solar-panel-dust-xai/
-├── app.py                     # Flask dashboard + /analyze + /explain APIs
-├── explanations.py            # Grad-CAM, SVM attribution, SHAP, review flags
-├── train_solar_dust.py        # End-to-end retraining + paper figures
+├── app.py                      # Flask dashboard (port 5001)
+├── explanations.py             # 5 XAI methods
+├── train_solar_dust.py         # training + ablation + figures + CSV
+├── gunicorn.conf.py            # production WSGI config
 ├── requirements.txt
-├── Models/                    # Deployed artifacts (SVM, scaler, class map, meta)
-├── static/uploads/            # Bundled sample images for demos & tests
+├── data/                       # train/val/test/{clean,dirty}
+├── Models/                     # svm_classifier.pkl, scaler.pkl, meta, caches
+│   └── compare/<backbone>/     # isolated backbone-comparison artifacts
+├── figures/                    # all generated plots (see §8)
+│   └── compare/<backbone>/
 ├── scripts/
-│   ├── prepare_data.py        # Kaggle dataset downloader / folder structurer
-│   └── make_xai_figures.py    # fig9_gradcam.png + fig10_shap.png
-├── figures/                   # Generated paper figures
-├── data/                      # Prepared dataset (gitignored)
-├── tests/                     # pytest suite (pure-python + deployed-model tests)
-└── .github/workflows/ci.yml   # CI: compile-check, pytest, figure generation
+│   ├── make_xai_figures.py     # fig9 / fig10
+│   ├── prepare_data.py         # dataset split
+│   └── merge_dataset.py        # multi-source merge
+├── templates/  static/         # dashboard UI
+└── tests/                      # pytest suite (9 tests)
 ```
 
-🏷️ Domain Classification
+---
 
-Domain Range: 29–99
-Category: Renewable Energy | IoT | Mechatronics | Automation
-Patent Range: Automated Solar Panel Cleaning Systems
+## 11. Testing
 
-🏆 Why This Project Stands Out
+```bash
+source /home/aditya/venv/bin/activate
+python -m pytest tests/ -q
+```
 
-✔ Real-world problem solving
-✔ AI + IoT + hardware integration
-✔ Scalable and cost-effective design
-✔ Government and industry relevance
-✔ Strong sustainability focus
+9 unit tests cover feature extraction, SVM training, XAI methods, and the
+`/analyze` endpoint.
 
-This project demonstrates end-to-end system design, combining AI, embedded systems, and renewable energy engineering into a deployable real-world solution.
+---
 
-📚 Credits & Citation
+## 12. Limitations & Future Work
 
-Data
+- Per-source datasets are modest; the merged 3,787-image multi-source corpus mitigates single-source overfitting (see external-validation results).
+- Labels are binary (clean/dirty); multi-class *dust-severity* is future work.
+- Fine-tuning the last 30% of the backbone did not beat the frozen representation on this corpus, suggesting frozen transfer learning already captures sufficient signal.
+- Deploy as an edge service (TensorFlow Lite / ONNX) for on-panel inference.
 
-Thanks to the authors of the Kaggle soiling datasets used for training (see "Public datasets to get started"). If you reuse the training artefacts or figures produced by `train_solar_dust.py`, cite the paper:
+---
 
-    A. Adhatrao, K. Zadbuke, P. Sangolgi, A. Shirsatrao, M. Waghamare and S. Shah,
-    "A Hybrid VGG16–SVM Framework for Automated Dust Detection on Solar Panels
-     with Explainable AI", IEEE, 2025.
+## 13. License
 
-Explainability references
-
-- R. R. Selvaraju et al., "Grad-CAM: Visual Explanations from Deep Networks via
-  Gradient-Based Localization", ICCV 2017.
-- S. M. Lundberg and S.-I. Lee, "A Unified Approach to Interpreting Model
-  Predictions", NeurIPS 2017.
-
-License
-
-Dataset and trained-model artefacts belong to their respective sources; the code is shared for research and demonstration purposes. Rotate any credentials before deploying (see `.env.example`).
+Code: MIT. Dataset: respect the Kaggle source license
+(`safwanshamsir99/solar-photovoltaics-panell-for-dust-dectection`).

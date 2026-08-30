@@ -56,7 +56,7 @@ def fig9_gradcam(clean_paths, dirty_paths):
         ax.imshow(np.asarray(overlay))
         ax.set_title(f"{title} | P(dirty)={probs[1]:.2f}")
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("Fig. 9 - Grad-CAM localization heatmaps (VGG16 block5_conv3 -> linear SVM)")
+    fig.suptitle("Fig. 9 - Grad-CAM localization heatmaps (EfficientNet-B2 last conv block -> SVM)")
     fig.tight_layout()
     os.makedirs(FIG_DIR, exist_ok=True)
     fig.savefig(os.path.join(FIG_DIR, "fig9_gradcam.png"), dpi=200)

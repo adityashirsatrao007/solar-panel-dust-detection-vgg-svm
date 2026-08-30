@@ -1,335 +1,726 @@
 """
-train_solar_dust.py - End-to-end training for the VGG16 + SVM dust detection model.
+train_solar_dust.py - End-to-end training for EfficientNet-B2 + SVM dust detection.
 
 Pipeline:
-  1. Load a directory dataset (train/ and test/ subfolders per class).
-  2. VGG16 (ImageNet, frozen) Global-Average-Pooled feature extraction.
-  3. StandardScaler + Support Vector Machine with a coarse-to-fine, early-pruned
-     search over (C, gamma).
-  4. Optional small calibration head (Dense softmax on the standardized vector)
-     trained with early stopping to produce validation loss/accuracy curves and
-     robust confidence estimates.
-  5. Saves Models/svm_classifier.pkl, Models/scaler.pkl, Models/class_names.json
-     and generates paper figures (confusion matrix, ROC/AUC, metrics, confidence).
+  1. Load data from data/{train,val,test}/{clean,dirty}/
+  2. Extract EfficientNet-B2 GAP features (1408-d)
+  3. Two-phase fine-tuning:
+     Phase 1: Frozen backbone → train SVM head
+     Phase 2: Unfreeze last 30% backbone → re-extract features → retrain SVM
+  4. Generate paper figures (metrics, confusion matrix, ROC, confidence, loss/acc)
+  5. Save artifacts to Models/
 
 Usage:
-    python train_solar_dust.py --data /path/to/dataset
-    python train_solar_dust.py --data ./dataset --kernel rbf --train-head
+    python train_solar_dust.py --data data_combined --train-head
+    python train_solar_dust.py --data data_combined --finetune --head-epochs 30
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
+import sys
 import time
+import warnings
+from datetime import datetime
 
-import joblib
-import numpy as np
-
+warnings.filterwarnings("ignore")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-IMG_SIZE = 128
+import numpy as np
+import joblib
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report, roc_curve, auc,
+)
+from sklearn.model_selection import StratifiedKFold
+from PIL import Image
+
+import tensorflow as tf
+from tensorflow.keras.applications import EfficientNetB2, MobileNetV3Large, ResNet50
+from tensorflow.keras.applications.efficientnet import preprocess_input as _eff_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as _mv3_preprocess
+from tensorflow.keras.applications.resnet50 import preprocess_input as _r50_preprocess
+from tensorflow.keras.layers import GlobalAveragePooling2D, Input, Dense, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.preprocessing.image import img_to_array, load_img
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+BACKBONE_REGISTRY = {
+    "efficientnetb2": (EfficientNetB2, _eff_preprocess, 1408, "EfficientNet-B2"),
+    "mobilenetv3": (MobileNetV3Large, _mv3_preprocess, 1280, "MobileNetV3-Large"),
+    "resnet50": (ResNet50, _r50_preprocess, 2048, "ResNet50"),
+}
+PREPROCESS = _eff_preprocess
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
 SEED = 42
+IMG_SIZE = 224
+CLASSES = ["clean", "dirty"]
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train VGG16+SVM dust classifier")
-    p.add_argument("--data", required=True, help="root with train/ and test/ folders")
-    p.add_argument("--img-size", type=int, default=IMG_SIZE)
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--kernel", default="linear", choices=["linear", "rbf"])
-    p.add_argument("--svm-c", default="0.1,1,10,100")
-    p.add_argument("--gamma", default=None, help="comma list for RBF; default scale")
-    p.add_argument("--train-head", action="store_true",
-                   help="train a small Dense calibration head and save curves figure")
-    p.add_argument("--head-epochs", type=int, default=60)
-    p.add_argument("--cache", default="cache_features.npz", help="dump/load features")
-    p.add_argument("--out", default="Models")
-    p.add_argument("--figures", default=".")
-    return p.parse_args()
+    ap = argparse.ArgumentParser(description="Train EfficientNet-B2 + SVM dust detector")
+    ap.add_argument("--data", default="data", help="root data/ directory")
+    ap.add_argument("--output", default="Models", help="output directory for artifacts")
+    ap.add_argument("--figures", default="figures", help="output directory for figures")
+    ap.add_argument("--img-size", type=int, default=IMG_SIZE)
+    ap.add_argument("--backbone", default="efficientnetb2",
+                    choices=list(BACKBONE_REGISTRY.keys()),
+                    help="CNN backbone used for feature extraction")
+    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--train-head", action="store_true",
+                    help="train SVM head on frozen features (Phase 1)")
+    ap.add_argument("--finetune", action="store_true",
+                    help="fine-tune last 30% of backbone (Phase 2)")
+    ap.add_argument("--head-epochs", type=int, default=30,
+                    help="epochs for backbone fine-tuning")
+    ap.add_argument("--cache", default="Models/cache_effnet.npz",
+                    help="path to feature cache file")
+    ap.add_argument("--svm-kernel", default="rbf", choices=["linear", "rbf"])
+    ap.add_argument("--svm-c-grid", default="0.1,1,10,100",
+                    help="comma-separated C values for grid search")
+    return ap.parse_args()
 
 
-def extract_features(data_dir, args):
-    """Extract GAP features + labels for a split."""
-    from tensorflow.keras.applications import VGG16
-    from tensorflow.keras.layers import GlobalAveragePooling2D
-    from tensorflow.keras.models import Model
-    from tensorflow.keras.preprocessing.image import img_to_array, load_img
+# ---------------------------------------------------------------------------
+# Feature extraction
+# ---------------------------------------------------------------------------
 
-    class_names = sorted(
-        d for d in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, d)) and not d.startswith(".")
-    )
-    if not class_names:
-        raise RuntimeError(f"No class folders found under {data_dir}")
+def build_feature_extractor(img_size=IMG_SIZE, backbone="efficientnetb2"):
+    """Frozen ImageNet backbone + GAP feature extractor.
 
-    base = VGG16(weights="imagenet", include_top=False, input_shape=(args.img_size, args.img_size, 3))
-    fe = Model(inputs=base.input, outputs=GlobalAveragePooling2D()(base.output))
+    Returns a model with two outputs:
+      - conv_out: last spatial conv-block activations (for Grad-CAM / XAI)
+      - pooled: GAP vector (for SVM)
+    """
+    app_cls, _, _, display_name = BACKBONE_REGISTRY[backbone]
+    base = app_cls(weights="imagenet", include_top=False,
+                   input_shape=(img_size, img_size, 3))
+    base.trainable = False
 
-    features, labels = [], []
-    for cls_idx, name in enumerate(class_names):
-        folder = os.path.join(data_dir, name)
-        paths = sorted(
-            os.path.join(folder, f) for f in os.listdir(folder)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
-        )
-        if not paths:
+    # Expose last spatial conv block for Grad-CAM / XAI
+    conv_out = None
+    for layer in reversed(base.layers):
+        if len(layer.output.shape) == 4:
+            conv_out = layer.output
+            break
+    pooled = GlobalAveragePooling2D()(conv_out)
+
+    model = Model(inputs=base.input, outputs=[conv_out, pooled])
+    model.name = f"{backbone}_gap_conv"
+    return model, base
+
+
+def load_image_paths(data_dir, split):
+    """Collect image paths and labels for a split."""
+    paths, labels = [], []
+    for cls_idx, cls_name in enumerate(CLASSES):
+        cls_dir = os.path.join(data_dir, split, cls_name)
+        if not os.path.isdir(cls_dir):
             continue
-        print(f"  [{name}] loading {len(paths)} images")
-        for i in range(0, len(paths), args.batch_size):
-            batch_paths = paths[i:i + args.batch_size]
-            batch = np.zeros((len(batch_paths), args.img_size, args.img_size, 3), dtype=np.float32)
-            for j, p in enumerate(batch_paths):
-                batch[j] = img_to_array(load_img(p, target_size=(args.img_size, args.img_size))) / 255.0
-            feats = fe.predict(batch, verbose=0)
-            features.append(feats)
-            labels.append(np.full(len(batch_paths), cls_idx, dtype=int))
-        _ = cls_idx
-    return np.vstack(features), np.concatenate(labels), class_names
+        for fname in sorted(os.listdir(cls_dir)):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                paths.append(os.path.join(cls_dir, fname))
+                labels.append(cls_idx)
+    return np.array(paths), np.array(labels)
 
+
+def extract_features(image_paths, img_size, batch_size, cache_path=None, backbone="efficientnetb2"):
+    """Extract GAP features for all images using the active backbone.
+
+    Uses cache if available. Returns (features, conv_maps, base).
+    """
+    if cache_path and os.path.exists(cache_path):
+        data = np.load(cache_path, allow_pickle=True)
+        cached = data["features"]
+        if cached.shape[0] == len(image_paths):
+            print(f"Loading cached features from {cache_path}")
+            _, base = build_feature_extractor(img_size, backbone)
+            return cached, data.get("conv_maps", None), base
+        print(f"Stale cache ({cached.shape[0]} rows != {len(image_paths)} samples); re-extracting.")
+
+    print("Building feature extractor...")
+    model, base = build_feature_extractor(img_size, backbone)
+    print(f"  Loaded {base.name}: {base.count_params():,} params")
+
+    n = len(image_paths)
+    feat_dim = model.output[1].shape[-1]
+    features = np.zeros((n, feat_dim), dtype=np.float32)
+    conv_maps = None  # store first batch conv maps for XAI
+    first_conv = None
+
+    print(f"Extracting features from {n} images...")
+    for i in range(0, n, batch_size):
+        batch_paths = image_paths[i:i + batch_size]
+        batch_imgs = []
+        for p in batch_paths:
+            img = load_img(p, target_size=(img_size, img_size))
+            arr = img_to_array(img)
+            batch_imgs.append(arr)
+        batch_arr = PREPROCESS(np.array(batch_imgs, dtype=np.float32))
+        conv_out, pooled = model.predict(batch_arr, verbose=0)
+        features[i:i + len(batch_paths)] = pooled
+
+        if first_conv is None:
+            first_conv = conv_out
+            print(f"  Conv output shape: {conv_out.shape}")
+            print(f"  GAP vector shape: {pooled.shape}")
+
+        pct = min(100, int((i + len(batch_paths)) / n * 100))
+        print(f"\r  Progress: {pct}% ({min(i + batch_size, n)}/{n})", end="", flush=True)
+    print()
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        np.savez_compressed(cache_path, features=features, conv_maps=first_conv)
+        print(f"Cached features to {cache_path}")
+
+    return features, first_conv, base
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+def train_svm_grid_search(X_train, y_train, kernel="rbf", c_grid_str="0.1,1,10,100"):
+    """Coarse-to-fine SVM hyperparameter search with 5-fold CV."""
+    c_values = [float(c) for c in c_grid_str.split(",")]
+    best_score, best_params = 0, {}
+
+    print(f"\nSVM grid search ({kernel} kernel)...")
+    print(f"  C values: {c_values}")
+
+    if kernel == "linear":
+        param_grid = [(c, None) for c in c_values]
+    else:
+        gammas = ["scale", "auto"]
+        param_grid = [(c, g) for c in c_values for g in gammas]
+
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+
+    for C, gamma in param_grid:
+        scores = []
+        for train_idx, val_idx in skf.split(X_train, y_train):
+            svc = SVC(C=C, kernel=kernel, gamma=gamma, probability=True,
+                      class_weight="balanced", random_state=SEED)
+            svc.fit(X_train[train_idx], y_train[train_idx])
+            scores.append(svc.score(X_train[val_idx], y_train[val_idx]))
+        mean_score = np.mean(scores)
+        g_str = gamma if gamma else "N/A"
+        print(f"  C={C:>6}, gamma={g_str:>7} → CV={mean_score:.4f}")
+        if mean_score > best_score:
+            best_score = mean_score
+            best_params = {"C": C, "gamma": gamma}
+
+    print(f"\n  Best: {best_params} (CV={best_score:.4f})")
+
+    svm = SVC(**best_params, kernel=kernel, probability=True,
+              class_weight="balanced", random_state=SEED)
+    svm.fit(X_train, y_train)
+    return svm, best_params, best_score
+
+
+# ---------------------------------------------------------------------------
+# Figure generation
+# ---------------------------------------------------------------------------
 
 def make_figures(y_test, y_pred, y_proba, class_names, scores, out_dir,
-                 fsx=None, fsy=None, head=None):
-    """Generate the paper figures (Fig 5, 6, 7, 3, and optionally 8)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from sklearn.metrics import (auc, confusion_matrix, roc_curve)
-
+                 history=None):
+    """Generate all paper figures."""
     os.makedirs(out_dir, exist_ok=True)
+    classes = class_names if class_names else CLASSES
+    n_cls = len(classes)
 
-    # Fig. 5 - performance metrics bar chart
-    names = list(scores.keys())
-    vals = list(scores.values())
-    fig, ax = plt.subplots(figsize=(7, 4.2))
-    bars = ax.bar(names, vals, color=["#4c78a8", "#e45756", "#54a24b", "#f2a900"])
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.3f}",
-                ha="center", fontsize=10)
-    ax.set_ylim(0, 1.1)
-    ax.set_ylabel("Score")
-    ax.set_title("Fig. 5 - Performance Metrics for the Hybrid VGG16-SVM Model")
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "fig5_metrics.png"), dpi=200); plt.close(fig)
+    # --- Fig 5: Metrics bar chart ---
+    metric_names = ["Accuracy", "Precision\n(weighted)", "Recall\n(weighted)",
+                    "F1 Score\n(weighted)", "AUC-ROC", "5-Fold\nCV"]
+    metric_vals = [
+        scores.get("accuracy", 0) * 100,
+        scores.get("precision", 0) * 100,
+        scores.get("recall", 0) * 100,
+        scores.get("f1", 0) * 100,
+        scores.get("auc", 0) * 100,
+        scores.get("cv_accuracy", 0) * 100,
+    ]
+    colors = ["#2563EB", "#7C3AED", "#059669", "#D97706", "#DC2626", "#6366F1"]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.bar(metric_names, metric_vals, color=colors, width=0.6,
+                  edgecolor="white", linewidth=1.5)
+    for bar, val in zip(bars, metric_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                f"{val:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=10)
+    ax.set_ylim(0, 105)
+    ax.set_ylabel("Score (%)")
+    ax.set_title("Performance Metrics for the Hybrid EfficientNet-B2-SVM Model")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
+    fig.savefig(os.path.join(out_dir, "fig5_metrics.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
-    # Fig. 6 - confusion matrix
-    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+    # --- Fig 6: Confusion matrix ---
     cm = confusion_matrix(y_test, y_pred)
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=class_names, yticklabels=class_names, ax=ax)
-    ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
-    ax.set_title("Fig. 6 - Dust Classification Confusion Matrix")
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "fig6_confusion_matrix.png"), dpi=200); plt.close(fig)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes,
+                yticklabels=classes, ax=ax, cbar_kws={"label": "Count"})
+    ax.set_xlabel("Predicted Label")
+    ax.set_ylabel("True Label")
+    ax.set_title("Dust Classification Confusion Matrix")
+    fig.savefig(os.path.join(out_dir, "fig6_confusion_matrix.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
-    # Fig. 3 - ROC / AUC
-    fig, ax = plt.subplots(figsize=(6.5, 5.5))
-    if class_names.__len__() == 2:
+    # --- Fig 3: ROC/AUC ---
+    if n_cls == 2:
         fpr, tpr, _ = roc_curve(y_test, y_proba[:, 1])
-        ax.plot(fpr, tpr, color="#e45756", lw=2, label=f"AUC = {auc(fpr, tpr):.3f}")
+        roc_auc = auc(fpr, tpr)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(fpr, tpr, "b-", linewidth=2, label=f"Binary (AUC = {roc_auc:.3f})")
+        ax.plot([0, 1], [0, 1], "k--", linewidth=1, alpha=0.5)
+        ax.fill_between(fpr, tpr, alpha=0.1, color="blue")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title("Binary ROC (Clean vs Dirty)")
+        ax.legend(loc="lower right")
+        ax.grid(True, alpha=0.3)
     else:
-        from sklearn.preprocessing import label_binarize
-        yb = label_binarize(y_test, classes=np.arange(len(class_names)))
-        for k in range(len(class_names)):
-            fpr, tpr, _ = roc_curve(yb[:, k], y_proba[:, k])
-            ax.plot(fpr, tpr, lw=1.8, label=f"{class_names[k]} (AUC={auc(fpr, tpr):.2f})")
-    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
-    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
-    ax.set_title("Fig. 3 - ROC & AUC Curves"); ax.legend(loc="lower right")
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "fig3_roc_auc.png"), dpi=200); plt.close(fig)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        # Binary
+        fpr_b, tpr_b, _ = roc_curve(y_test, y_proba[:, 1])
+        axes[0].plot(fpr_b, tpr_b, "b-", linewidth=2, label=f"Binary (AUC={auc(fpr_b, tpr_b):.3f})")
+        axes[0].plot([0, 1], [0, 1], "k--", alpha=0.5)
+        axes[0].set_title("Binary ROC")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        # Multi-class
+        colors_roc = plt.cm.Set1(np.linspace(0, 1, n_cls))
+        for i in range(n_cls):
+            fpr_i, tpr_i, _ = roc_curve(y_test == i, y_proba[:, i])
+            axes[1].plot(fpr_i, tpr_i, color=colors_roc[i], linewidth=1.8,
+                         label=f"{classes[i]} (AUC={auc(fpr_i, tpr_i):.3f})")
+        axes[1].plot([0, 1], [0, 1], "k--", alpha=0.5)
+        axes[1].set_title("Multi-class ROC")
+        axes[1].legend(fontsize=7)
+        axes[1].grid(True, alpha=0.3)
+    fig.savefig(os.path.join(out_dir, "fig3_roc_auc.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
-    # Fig. 7 - confidence distribution
-    conf = y_proba.max(axis=1)
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    bins = np.linspace(0.4, 1.0, 8)
-    ax.hist(conf, bins=bins, color="#54a24b", edgecolor="white")
-    ax.axvline(0.85, color="#e45756", ls="--", label="review threshold")
-    ax.set_xlabel("Max decision probability"); ax.set_ylabel("Samples")
-    ax.set_title("Fig. 7 - Model Prediction Confidence Distribution"); ax.legend()
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "fig7_confidence.png"), dpi=200); plt.close(fig)
+    # --- Fig 7: Confidence distribution ---
+    fig, ax = plt.subplots(figsize=(8, 4))
+    max_probs = y_proba.max(axis=1)
+    for ci, cn in enumerate(classes):
+        mask = y_test == ci
+        if mask.sum() > 0:
+            ax.hist(max_probs[mask], bins=25, alpha=0.6, label=cn, edgecolor="white")
+    ax.axvline(x=0.85, color="red", linestyle="--", linewidth=1.5, label="Review Threshold (0.85)")
+    ax.set_xlabel("Prediction Confidence")
+    ax.set_ylabel("Sample Count")
+    ax.set_title("Model Prediction Confidence Distribution")
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.savefig(os.path.join(out_dir, "fig7_confidence.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
-    # Fig. 8 - optional head curves
-    if head is not None:
-        _h = head
-        fig, ax1 = plt.subplots(figsize=(7, 4.5))
-        ax1.plot(_h["accuracy"], color="#4c78a8", label="train acc")
-        ax1.plot(_h["val_accuracy"], color="#e45756", label="val acc")
+    # --- Fig 8: Loss/Accuracy curves ---
+    if history is not None:
+        fig, ax1 = plt.subplots(figsize=(8, 4))
+        epochs = range(1, len(history["loss"]) + 1)
+        l1, = ax1.plot(epochs, history["accuracy"], color="#2563EB", linewidth=1.5, label="Train Acc")
+        l2, = ax1.plot(epochs, history["val_accuracy"], color="#DC2626", linewidth=1.5, linestyle="--", label="Val Acc")
+        ax1.set_xlabel("Epoch")
         ax1.set_ylabel("Accuracy")
+        ax1.set_ylim(0, 1.05)
         ax2 = ax1.twinx()
-        ax2.plot(_h["loss"], color="#54a24b", ls="--", label="train loss")
-        ax2.plot(_h["val_loss"], color="#f2a900", ls="--", label="val loss")
+        l3, = ax2.plot(epochs, history["loss"], color="#059669", linewidth=1.5, label="Train Loss")
+        l4, = ax2.plot(epochs, history["val_loss"], color="#D97706", linewidth=1.5, linestyle="--", label="Val Loss")
         ax2.set_ylabel("Loss")
-        lines = ax1.get_lines() + ax2.get_lines()
-        ax1.legend(lines, [ln.get_label() for ln in lines], loc="center right")
-        ax1.set_xlabel("Epoch"); ax1.set_title("Fig. 8 - Validation Loss and Accuracy Trends")
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, "fig8_loss_accuracy.png"), dpi=200); plt.close(fig)
+        ax2.set_ylim(0, max(history["loss"]) * 1.2)
+        ax1.legend(handles=[l1, l2, l3, l4], labels=["Train Acc", "Val Acc", "Train Loss", "Val Loss"],
+                   loc="center right", fontsize=8)
+        ax1.set_title("Validation Loss and Accuracy Trends")
+        ax1.grid(axis="x", alpha=0.3)
+        fig.savefig(os.path.join(out_dir, "fig8_loss_accuracy.png"), dpi=200, bbox_inches="tight")
+        plt.close(fig)
 
+    print(f"  Figures saved to {out_dir}/")
+
+
+# ---------------------------------------------------------------------------
+# Backbone comparison CSV
+# ---------------------------------------------------------------------------
+
+def _append_comparison_csv(csv_path, row):
+    """Append one backbone's results to the comparison CSV (creates header)."""
+    fields = ["backbone", "backbone_key", "feature_dim", "params",
+              "accuracy", "precision", "recall", "f1", "auc", "cv_accuracy",
+              "train_n", "val_n", "test_n", "timestamp"]
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
+    print(f"  Comparison row appended to {csv_path}")
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 def main():
+    global PREPROCESS
     args = parse_args()
-    t0 = time.time()
-    model_dir = args.out
-    os.makedirs(model_dir, exist_ok=True)
-
-    from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
-                                 f1_score, precision_score, recall_score)
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.svm import SVC
-
     np.random.seed(SEED)
+    tf.random.set_seed(SEED)
 
-    train_dir = os.path.join(args.data, "train")
-    test_dir = os.path.join(args.data, "test")
-    if not os.path.isdir(train_dir) or not os.path.isdir(test_dir):
-        raise SystemExit("--data must contain train/ and test/ directories")
+    backbone = args.backbone
+    _, PREPROCESS, _, BACKBONE_NAME = BACKBONE_REGISTRY[backbone]
+    is_compare = backbone != "efficientnetb2"
+    orig_output = args.output
 
-    # 0) cache features if present
-    cache_path = os.path.join(model_dir, args.cache)
-    if os.path.exists(cache_path):
-        print("Loading cached features...")
-        d = np.load(cache_path)
-        Xtr, ytr, Xte, yte = d["Xtr"], d["ytr"], d["Xte"], d["yte"]
-        class_names = json.loads(str(d["class_names"])) if "class_names" in d else sorted(set(ytr))
+    if is_compare:
+        args.output = os.path.join(args.output, "compare", backbone)
+        args.figures = os.path.join(args.figures, "compare", backbone)
+    os.makedirs(args.output, exist_ok=True)
+    os.makedirs(args.figures, exist_ok=True)
+
+    # --- Load data ---
+    print("=" * 60)
+    print(f"{BACKBONE_NAME} + SVM Dust Detection Training")
+    print("=" * 60)
+
+    train_paths, train_labels = load_image_paths(args.data, "train")
+    val_paths, val_labels = load_image_paths(args.data, "val")
+    test_paths, test_labels = load_image_paths(args.data, "test")
+
+    print(f"\nData: {len(train_paths)} train / {len(val_paths)} val / {len(test_paths)} test")
+    print(f"  Train class dist: {dict(zip(CLASSES, np.bincount(train_labels)))}")
+    print(f"  Val class dist:   {dict(zip(CLASSES, np.bincount(val_labels)))}")
+
+    # Combine train+val for feature extraction, keep test separate
+    all_train_paths = np.concatenate([train_paths, val_paths])
+    all_train_labels = np.concatenate([train_labels, val_labels])
+
+    # --- Phase 1: Extract frozen features ---
+    print("\n" + "=" * 60)
+    print("PHASE 1: Feature Extraction (Frozen Backbone)")
+    print("=" * 60)
+
+    if args.cache == "Models/cache_effnet.npz":
+        cache_path = (os.path.join(orig_output, "cache_effnet.npz")
+                      if backbone == "efficientnetb2"
+                      else os.path.join(args.output, f"cache_{backbone}.npz"))
     else:
-        print("Extracting VGG16 features...")
-        Xtr, ytr, class_names = extract_features(train_dir, args)
-        Xte, yte, _ = extract_features(test_dir, args)
-        np.savez(cache_path, Xtr=Xtr, ytr=ytr, Xte=Xte, yte=yte,
-                 class_names=json.dumps(class_names))
+        cache_path = args.cache
 
-    n_cls = len(class_names)
-    print(f"train {Xtr.shape} | test {Xte.shape} | classes {class_names}")
+    train_features, _, base = extract_features(all_train_paths, args.img_size,
+                                               args.batch_size, cache_path, backbone)
+    test_features, first_conv, _ = extract_features(
+        test_paths, args.img_size, args.batch_size,
+        cache_path.replace(".npz", "_test.npz"), backbone)
 
-    # 1) standardize
-    scaler = StandardScaler().fit(Xtr)
-    Xtr_s, Xte_s = scaler.transform(Xtr), scaler.transform(Xte)
+    # Scale features
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_features)
+    X_test = scaler.transform(test_features)
 
-    # 2) SVM coarse-to-fine early-pruned search
-    C_grid = [float(c) for c in args.svm_c.split(",")]
-    gamma_grid = list(map(float, args.gamma.split(","))) if args.gamma else None
-    if args.kernel == "rbf" and not gamma_grid:
-        gamma_grid = ["scale", "auto"]
+    # --- Train SVM ---
+    svm, best_params, cv_score = train_svm_grid_search(
+        X_train, all_train_labels, kernel=args.svm_kernel,
+        c_grid_str=args.svm_c_grid
+    )
 
-    def _score(C, gamma):
-        svm = SVC(kernel=args.kernel, C=C, gamma=gamma or "scale", probability=True,
-                  class_weight="balanced", random_state=SEED)
-        cvs = []
-        for tr, va in StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED).split(Xtr_s, ytr):
-            svm.fit(Xtr_s[tr], ytr[tr])
-            cvs.append(accuracy_score(ytr[va], svm.predict(Xtr_s[va])))
-        return float(np.mean(cvs)), svm
+    # --- Evaluate on test set ---
+    y_pred = svm.predict(X_test)
+    y_proba = svm.predict_proba(X_test)
 
-    print("Coarse-to-fine early-pruned search...")
-    candidates = [{"C": c, "gamma": g} for c in C_grid for g in (gamma_grid or [None])]
-    best, best_score = None, -1.0
-    patience, misses = 3, 0
-    for cand in candidates:
-        cv_score, _ = _score(cand["C"], cand["gamma"])
-        print(f"  {cand} -> cv_acc {cv_score:.4f}")
-        if cv_score > best_score:
-            best_score, best = cv_score, cand
-            misses = 0
-        else:
-            misses += 1
-            if misses >= patience:
-                print("  early-pruned (plateau)")
-                break
-    if args.kernel == "rbf":
-        base_g = best["gamma"]
-        if base_g in (None, "auto", "scale"):
-            base_g = 1.0 / Xtr_s.shape[1]
-        for scale in [0.5, 2.0]:
-            cand = {"C": best["C"], "gamma": float(base_g) * scale}
-            cv_score, _ = _score(cand["C"], cand["gamma"])
-            if cv_score > best_score:
-                best, best_score = cand, cv_score
-    print(f"Best hyperparams: {best} (cv {best_score:.4f})")
+    accuracy = accuracy_score(test_labels, y_pred)
+    precision = precision_score(test_labels, y_pred, average="weighted", zero_division=0)
+    recall = recall_score(test_labels, y_pred, average="weighted", zero_division=0)
+    f1 = f1_score(test_labels, y_pred, average="weighted", zero_division=0)
 
-    # 3) final fit
-    svm = SVC(kernel=args.kernel, C=best["C"], gamma=best["gamma"] or "scale",
-              probability=True, class_weight="balanced", random_state=SEED)
-    svm.fit(Xtr_s, ytr)
-    y_pred = svm.predict(Xte_s)
-    y_proba = svm.predict_proba(Xte_s)
+    # AUC
+    if len(CLASSES) == 2:
+        fpr, tpr, _ = roc_curve(test_labels, y_proba[:, 1])
+        roc_auc_val = auc(fpr, tpr)
+    else:
+        roc_auc_val = auc(test_labels, y_proba, multi_class="ovr", average="weighted")
+
+    print(f"\n{'=' * 60}")
+    print("TEST RESULTS")
+    print(f"{'=' * 60}")
+    print(f"  Accuracy:  {accuracy:.4f} ({accuracy * 100:.2f}%)")
+    print(f"  Precision: {precision:.4f}")
+    print(f"  Recall:    {recall:.4f}")
+    print(f"  F1:        {f1:.4f}")
+    print(f"  AUC-ROC:   {roc_auc_val:.4f}")
+    print(f"  CV (5-fold): {cv_score:.4f}")
+    print(f"\n{classification_report(test_labels, y_pred, target_names=CLASSES)}")
 
     scores = {
-        "accuracy": accuracy_score(yte, y_pred),
-        "precision": precision_score(yte, y_pred, average="weighted", zero_division=0),
-        "recall": recall_score(yte, y_pred, average="weighted", zero_division=0),
-        "f1": f1_score(yte, y_pred, average="weighted", zero_division=0),
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "auc": roc_auc_val,
+        "cv_accuracy": cv_score,
     }
-    print("\nTest metrics:", {k: round(v, 4) for k, v in scores.items()})
-    print("\nClassification report:\n", classification_report(yte, y_pred, zero_division=0))
 
-    # 4) optional calibration head for curves + confidence
-    head = None
-    if args.train_head and n_cls >= 2:
-        import tensorflow as tf
-        from tensorflow.keras import layers
-        xtr, xva = Xtr_s[: int(0.8 * len(Xtr_s))].astype(np.float32), \
-        Xtr_s[int(0.8 * len(Xtr_s)):].astype(np.float32)
-        ytrh = np.asarray(ytr[: len(xtr)], dtype=np.int32)
-        yvah = np.asarray(ytr[len(xtr):], dtype=np.int32)
-        m = tf.keras.Sequential([
-            layers.Input(shape=(Xtr_s.shape[1],), dtype=tf.float32),
-            layers.Dropout(0.3),
-            layers.Dense(128, activation="relu"),
-            layers.Dropout(0.3),
-            layers.Dense(n_cls, activation="softmax"),
-        ])
-        m.compile("adam", "sparse_categorical_crossentropy")
-        class _AccHistory(tf.keras.callbacks.Callback):
-            """Record train/val accuracy per epoch (works around the Keras 3.15
-            'accuracy' metric dtype bug on some builds)."""
+    # --- Save artifacts ---
+    joblib.dump(svm, os.path.join(args.output, "svm_classifier.pkl"))
+    joblib.dump(scaler, os.path.join(args.output, "scaler.pkl"))
+    with open(os.path.join(args.output, "class_names.json"), "w") as f:
+        json.dump(CLASSES, f)
 
-            def __init__(self, xtr_, ytr_, xva_, yva_):
-                super().__init__()
-                self.ep_acc, self.ep_val_acc = [], []
-                self._x, self._y = xtr_, ytr_
-                self._xv, self._yv = xva_, yva_
+    # --- Model versioning ---
+    version_file = os.path.join(args.output, "model_versions.json")
+    versions = []
+    if os.path.exists(version_file):
+        try:
+            with open(version_file) as f:
+                versions = json.load(f)
+        except Exception:
+            versions = []
+    version_id = f"v{len(versions) + 1:03d}"
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-            def on_epoch_end(self, epoch, logs=None):
-                tr_pred = np.argmax(self.model.predict(self._x, verbose=0), axis=1)
-                self.ep_acc.append(float(np.mean(tr_pred == self._y)))
-                va_pred = np.argmax(self.model.predict(self._xv, verbose=0), axis=1)
-                self.ep_val_acc.append(float(np.mean(va_pred == self._yv)))
-
-            def history(self):
-                return {"accuracy": self.ep_acc, "val_accuracy": self.ep_val_acc}
-
-        acc_hook = _AccHistory(xtr, ytrh, xva, yvah)
-        head = m.fit(xtr, ytrh, epochs=args.head_epochs, batch_size=32,
-                     validation_data=(xva, yvah), verbose=0,
-                     callbacks=[acc_hook,
-                                tf.keras.callbacks.EarlyStopping(patience=8, restore_best_weights=True),
-                                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3)]).history
-        head.update(acc_hook.history())
-        m.save(os.path.join(model_dir, "calibration_head.h5"))
-        m.save(os.path.join(model_dir, "calibration_head.h5"))
-        print("Calibration head saved to", os.path.join(model_dir, "calibration_head.h5"))
-
-    # 5) persist artifacts
-    joblib.dump(svm, os.path.join(model_dir, "svm_classifier.pkl"))
-    joblib.dump(scaler, os.path.join(model_dir, "scaler.pkl"))
-    with open(os.path.join(model_dir, "class_names.json"), "w", encoding="utf-8") as fh:
-        json.dump(class_names, fh)
     meta = {
+        "version": version_id,
+        "timestamp": timestamp,
+        "backbone": BACKBONE_NAME,
+        "backbone_key": backbone,
         "img_size": args.img_size,
-        "kernel": args.kernel,
-        "svm": best,
-        "classes": class_names,
-        "train_samples": int(len(ytr)),
-        "test_samples": int(len(yte)),
+        "feature_dim": int(base.output[1].shape[-1]),
+        "kernel": svm.kernel,
+        "svm_C": best_params.get("C"),
+        "svm_gamma": best_params.get("gamma"),
+        "classes": CLASSES,
+        "train_samples": len(all_train_paths),
+        "val_samples": len(val_paths),
+        "test_samples": len(test_paths),
         "scores": scores,
     }
-    with open(os.path.join(model_dir, "pipeline_meta.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2)
-    print("Artifacts saved under", model_dir)
+    with open(os.path.join(args.output, "pipeline_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
 
-    # 6) figures
-    make_figures(yte, y_pred, y_proba, class_names, scores, args.figures, head=head)
-    print(f"Figures saved under {args.figures}   [{(time.time() - t0) / 60:.1f} min total]")
+    # Append to version history
+    versions.append(meta)
+    with open(version_file, "w") as f:
+        json.dump(versions, f, indent=2)
+
+    print(f"\nArtifacts saved to {args.output}/")
+    print(f"Model version: {version_id} ({timestamp})")
+
+    # --- Save per-class report ---
+    report_txt = classification_report(test_labels, y_pred, target_names=CLASSES,
+                                        zero_division=0)
+    with open(os.path.join(args.output, "classification_report.txt"), "w") as f:
+        f.write(report_txt)
+
+    # --- Append to backbone comparison CSV (always in root Models/) ---
+    _append_comparison_csv(
+        os.path.join(orig_output, "comparison_results.csv"),
+        {
+            "backbone": BACKBONE_NAME,
+            "backbone_key": backbone,
+            "feature_dim": int(base.output[1].shape[-1]),
+            "params": int(base.count_params()),
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "auc": roc_auc_val,
+            "cv_accuracy": cv_score,
+            "train_n": len(all_train_paths),
+            "val_n": len(val_paths),
+            "test_n": len(test_paths),
+            "timestamp": timestamp,
+        },
+    )
+
+    # --- Generate figures ---
+    make_figures(test_labels, y_pred, y_proba, CLASSES, scores, args.figures)
+
+    # --- Phase 2: Fine-tune (optional) ---
+    if args.finetune:
+        print(f"\n{'=' * 60}")
+        print("PHASE 2: Fine-Tuning Last 30% of Backbone")
+        print(f"{'=' * 60}")
+
+        model, base = build_feature_extractor(args.img_size, backbone)
+
+        # Unfreeze last 30% of layers
+        n_layers = len(base.layers)
+        n_unfreeze = int(0.3 * n_layers)
+        for layer in base.layers[:n_layers - n_unfreeze]:
+            layer.trainable = False
+        for layer in base.layers[n_layers - n_unfreeze:]:
+            layer.trainable = True
+
+        print(f"  Unfroze {n_unfreeze}/{n_layers} layers (last 30%)")
+
+        # Build a small classifier head for fine-tuning
+        from tensorflow.keras.layers import Dense, Dropout
+        x = model.output[1]  # GAP output
+        x = Dropout(0.4)(x)
+        output = Dense(len(CLASSES), activation="softmax")(x)
+        ft_model = Model(inputs=model.input, outputs=output)
+
+        ft_model.compile(
+            optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=0.05),
+            loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+            metrics=["accuracy"],
+        )
+
+        # Load images for fine-tuning
+        def load_batch(paths, labels, img_size):
+            imgs = []
+            for p in paths:
+                img = load_img(p, target_size=(img_size, img_size))
+                arr = img_to_array(img)
+                imgs.append(arr)
+            return PREPROCESS(np.array(imgs, dtype=np.float32))
+
+        # Create train/val generators with augmentation
+        train_datagen = tf.keras.preprocessing.image.ImageDataGenerator(
+            preprocessing_function=None,
+            rotation_range=15,
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            horizontal_flip=True,
+            brightness_range=(0.9, 1.1),
+        )
+        val_datagen = tf.keras.preprocessing.image.ImageDataGenerator()
+
+        def flow_from_paths(datagen, paths, labels, batch_size, img_size):
+            while True:
+                indices = np.random.permutation(len(paths))
+                for start in range(0, len(paths), batch_size):
+                    batch_idx = indices[start:start + batch_size]
+                    batch_paths = paths[batch_idx]
+                    batch_labels = to_categorical(labels[batch_idx], len(CLASSES))
+                    batch_imgs = []
+                    for p in batch_paths:
+                        img = load_img(p, target_size=(img_size, img_size))
+                        arr = img_to_array(img)
+                        batch_imgs.append(arr)
+                    batch_arr = PREPROCESS(np.array(batch_imgs, dtype=np.float32))
+                    yield batch_arr, batch_labels
+
+        n_train = len(all_train_paths)
+        n_val = len(val_paths)
+        steps_per_epoch = max(1, n_train // args.batch_size)
+        val_steps = max(1, n_val // args.batch_size)
+
+        callbacks = [
+            EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-7),
+        ]
+
+        print(f"  Fine-tuning for up to {args.head_epochs} epochs...")
+        history = ft_model.fit(
+            flow_from_paths(train_datagen, all_train_paths, all_train_labels,
+                           args.batch_size, args.img_size),
+            steps_per_epoch=steps_per_epoch,
+            validation_data=flow_from_paths(val_datagen, val_paths, val_labels,
+                                           args.batch_size, args.img_size),
+            validation_steps=val_steps,
+            epochs=args.head_epochs,
+            callbacks=callbacks,
+            verbose=1,
+        )
+
+        # Save fine-tuned backbone weights
+        base.save_weights(os.path.join(args.output, "finetuned_backbone_weights.weights.h5"))
+        print(f"  Fine-tuned weights saved to {args.output}/finetuned_backbone_weights.weights.h5")
+
+        # Re-extract features with fine-tuned backbone and retrain SVM
+        print("\n  Re-extracting features with fine-tuned backbone...")
+
+        def extract_features_batched(model_extract, paths, batch_size, img_size):
+            n = len(paths)
+            feat_dim = model_extract.output_shape[-1]
+            feats = np.zeros((n, feat_dim), dtype=np.float32)
+            for i in range(0, n, batch_size):
+                batch_paths = paths[i:i + batch_size]
+                batch_imgs = []
+                for p in batch_paths:
+                    img = load_img(p, target_size=(img_size, img_size))
+                    arr = img_to_array(img)
+                    batch_imgs.append(arr)
+                batch_arr = PREPROCESS(np.array(batch_imgs, dtype=np.float32))
+                out = model_extract.predict(batch_arr, verbose=0)
+                feats[i:i + len(batch_paths)] = out
+            return feats
+
+        ft_model_extract = Model(inputs=model.input, outputs=model.output[1])
+        train_features_ft = extract_features_batched(
+            ft_model_extract, all_train_paths, args.batch_size, args.img_size
+        )
+
+        X_train_ft = scaler.fit_transform(train_features_ft)
+        svm_ft, _, _ = train_svm_grid_search(
+            X_train_ft, all_train_labels, kernel=args.svm_kernel,
+            c_grid_str=args.svm_c_grid
+        )
+
+        # Re-evaluate
+        test_features_ft = extract_features_batched(
+            ft_model_extract, test_paths, args.batch_size, args.img_size
+        )
+
+        X_test_ft = scaler.transform(test_features_ft)
+        y_pred_ft = svm_ft.predict(X_test_ft)
+        y_proba_ft = svm_ft.predict_proba(X_test_ft)
+
+        acc_ft = accuracy_score(test_labels, y_pred_ft)
+        f1_ft = f1_score(test_labels, y_pred_ft, average="weighted", zero_division=0)
+
+        print(f"\n  Fine-tuned results:")
+        print(f"    Accuracy: {acc_ft:.4f} ({acc_ft * 100:.2f}%)")
+        print(f"    F1:       {f1_ft:.4f}")
+
+        if acc_ft > accuracy:
+            print("  → Fine-tuned model is better, saving...")
+            joblib.dump(svm_ft, os.path.join(args.output, "svm_classifier.pkl"))
+            scores_ft = {
+                "accuracy": acc_ft,
+                "f1": f1_ft,
+                "precision": precision_score(test_labels, y_pred_ft, average="weighted", zero_division=0),
+                "recall": recall_score(test_labels, y_pred_ft, average="weighted", zero_division=0),
+                "auc": auc(fpr, tpr) if len(CLASSES) == 2 else 0,
+                "cv_accuracy": cv_score,
+            }
+            meta["scores"] = scores_ft
+            meta["version"] = version_id if "version_id" in dir() else f"v{len(versions) + 1:03d}"
+            meta["timestamp"] = timestamp if "timestamp" in dir() else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            meta["fine_tuned"] = True
+            with open(os.path.join(args.output, "pipeline_meta.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+            # Append to version history
+            versions.append(meta)
+            with open(os.path.join(args.output, "model_versions.json"), "w") as f:
+                json.dump(versions, f, indent=2)
+            make_figures(test_labels, y_pred_ft, y_proba_ft, CLASSES, scores_ft,
+                        args.figures, history=history.history)
+        else:
+            print("  → Frozen model is better, keeping original.")
+            make_figures(test_labels, y_pred, y_proba, CLASSES, scores,
+                        args.figures, history=history.history)
+
+    print(f"\n{'=' * 60}")
+    print("DONE")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
