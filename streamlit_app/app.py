@@ -5,7 +5,7 @@ Hybrid EfficientNet-B2 + SVM pipeline with Grad-CAM explainability.
 Deployed on Streamlit Community Cloud.
 """
 
-import os, json, tempfile, warnings
+import os, json, warnings
 warnings.filterwarnings("ignore")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
@@ -16,7 +16,7 @@ from PIL import Image
 
 st.set_page_config(page_title="Solar Panel Dust Detection", page_icon="☀️", layout="centered")
 
-# ── Model loading ───────────────────────────────────────────────────────────
+# ── Model loading (single cached model for both predict + Grad-CAM) ─────────
 @st.cache_resource(show_spinner="Loading model from Hugging Face Hub...")
 def load_pipeline():
     from huggingface_hub import hf_hub_download
@@ -34,87 +34,85 @@ def load_pipeline():
 
 
 @st.cache_resource(show_spinner="Loading EfficientNet-B2 backbone...")
-def load_extractor():
+def load_models():
+    """Load ONE EfficientNet-B2 with two outputs: conv (for Grad-CAM) + pooled (for SVM)."""
     import tensorflow as tf
     tf.get_logger().setLevel("ERROR")
     from tensorflow.keras.applications import EfficientNetB2
     from tensorflow.keras.applications.efficientnet import preprocess_input
     from tensorflow.keras.layers import GlobalAveragePooling2D
     from tensorflow.keras.models import Model
+
     base = EfficientNetB2(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
-    pooled = GlobalAveragePooling2D()(base.output)
-    model = Model(inputs=base.input, outputs=pooled)
-    return model, preprocess_input
+    conv_out = base.layers[-1].output          # (B, 7, 7, 1408)
+    pooled_out = GlobalAveragePooling2D()(base.output)  # (B, 1408)
+    full_model = Model(inputs=base.input, outputs=[conv_out, pooled_out])
+    return full_model, preprocess_input
 
 
-# ── Prediction ──────────────────────────────────────────────────────────────
-def predict(image: Image.Image):
+# ── Predict + Grad-CAM (single forward pass) ────────────────────────────────
+def analyze(image: Image.Image):
     svm, scaler, labels, meta = load_pipeline()
-    extractor, preprocess = load_extractor()
+    model, preprocess = load_models()
+
     img = image.convert("RGB").resize((224, 224))
     arr = preprocess(np.expand_dims(np.array(img, dtype=np.float32), 0))
-    pooled = extractor.predict(arr, verbose=0)
-    z = scaler.transform(pooled)
+
+    # Single forward pass → conv + pooled
+    conv, pooled = model.predict(arr, verbose=0)
+    pooled, conv = pooled[0], conv[0]
+
+    # SVM prediction
+    z = scaler.transform(pooled.reshape(1, -1))
     probs = svm.predict_proba(z)[0]
     idx = int(np.argmax(probs))
     label = labels[idx] if idx < len(labels) else str(idx)
     conf = float(probs.max())
     dirty_idx = labels.index("dirty") if "dirty" in labels else len(probs) - 1
     dustiness = float(probs[dirty_idx]) * 100
-    return label, conf, dustiness, probs
 
-
-def gradcam(image: Image.Image):
-    svm, scaler, labels, _ = load_pipeline()
-    import tensorflow as tf
-    tf.get_logger().setLevel("ERROR")
-    from tensorflow.keras.applications import EfficientNetB2
-    from tensorflow.keras.applications.efficientnet import preprocess_input
-    from tensorflow.keras.layers import GlobalAveragePooling2D
-    from tensorflow.keras.models import Model
-    base = EfficientNetB2(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
-    conv_out = base.layers[-1].output
-    pooled_out = GlobalAveragePooling2D()(base.output)
-    full_model = Model(inputs=base.input, outputs=[conv_out, pooled_out])
-    img = image.convert("RGB").resize((224, 224))
-    arr = preprocess_input(np.expand_dims(np.array(img, dtype=np.float32), 0))
-    conv, pooled = full_model.predict(arr, verbose=0)
-    pooled, conv = pooled[0], conv[0]
-    z = scaler.transform(pooled.reshape(1, -1)).ravel()
-    gamma = float(getattr(svm, "_gamma", svm.gamma) or (1.0 / z.shape[0]))
+    # Grad-CAM via SVM gradient
+    zs = scaler.transform(pooled.reshape(1, -1)).ravel()
+    gamma = float(getattr(svm, "_gamma", svm.gamma) or (1.0 / zs.shape[0]))
     sv = svm.support_vectors_
     dual = np.asarray(svm.dual_coef_)
     alpha_y = dual[0] if dual.ndim == 1 else dual.sum(axis=0)
-    k = np.exp(-gamma * ((z[None, :] - sv) ** 2).sum(axis=1))
-    grad = -2.0 * gamma * (alpha_y * k)[:, None] * (z[None, :] - sv)
+    k = np.exp(-gamma * ((zs[None, :] - sv) ** 2).sum(axis=1))
+    grad = -2.0 * gamma * (alpha_y * k)[:, None] * (zs[None, :] - sv)
     grad = grad.sum(axis=0) / np.maximum(scaler.scale_, 1e-12)
+
     hm = np.maximum(np.tensordot(grad, conv, axes=(0, 2)), 0.0)
     hmax = hm.max()
     if hmax > 0:
         hm = hm / hmax
+
+    # Build heatmap overlay
     import matplotlib
     matplotlib.use("Agg")
     cmap = matplotlib.colormaps.get_cmap("jet")
-    hm_resized = np.array(Image.fromarray(np.uint8(255 * np.clip(hm, 0, 1))).resize(
-        img.size, Image.BILINEAR)).astype(np.float32) / 255.0
-    rgb = cmap(hm_resized)[:, :, :3]
+    hm_pil = Image.fromarray(np.uint8(255 * np.clip(hm, 0, 1))).resize(img.size, Image.BILINEAR)
+    hm_arr = np.array(hm_pil).astype(np.float32) / 255.0
+    rgb = cmap(hm_arr)[:, :, :3]
     orig = np.array(img).astype(np.float32) / 255.0
     overlay = (1 - 0.45) * orig + 0.45 * rgb
-    return Image.fromarray(np.uint8(255 * np.clip(overlay, 0, 1)))
+    overlay_img = Image.fromarray(np.uint8(255 * np.clip(overlay, 0, 1)))
+
+    return label, conf, dustiness, probs, overlay_img, hm_pil
 
 
 # ── UI ──────────────────────────────────────────────────────────────────────
 st.title("☀️ Solar Panel Dust Detection")
-st.caption("Hybrid EfficientNet-B2 + SVM · Explainable AI · [GitHub](https://github.com/adityashirsatrao007/Hybrid-VGG16-SVM-Framework-for-Automated-Dust-Detection-on-Solar-Panels-Advancing-Energy-Efficiency)")
+st.caption("Hybrid EfficientNet-B2 + SVM · Explainable AI · "
+           "[GitHub](https://github.com/adityashirsatrao007/solar-panel-dust-detection-vgg-svm)")
 
 with st.sidebar:
     st.header("About")
-    st.markdown("Upload a solar panel photo. The model classifies **clean** vs **dirty** with Grad-CAM explainability.")
+    st.markdown("Upload a solar panel photo. The model classifies **clean** vs **dirty** and shows a Grad-CAM heatmap highlighting the dusty regions.")
     st.divider()
     st.markdown("**Architecture**")
     st.code("EfficientNet-B2 (frozen, ImageNet)\n  → GAP 1408-d\n  → RBF-SVM", language=None)
     st.divider()
-    svm, _, _, meta = load_pipeline()
+    _, _, _, meta = load_pipeline()
     st.markdown("**Model metrics**")
     c1, c2 = st.columns(2)
     c1.metric("Accuracy", f"{meta['scores']['accuracy']*100:.1f}%")
@@ -128,34 +126,47 @@ uploaded = st.file_uploader("Upload a solar panel image", type=["jpg", "jpeg", "
 
 if uploaded:
     img = Image.open(uploaded)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(img, caption="Uploaded image", use_container_width=True)
-    with st.spinner("Analyzing..."):
-        label, conf, dustiness, probs = predict(img)
-    with col2:
+
+    with st.spinner("Analyzing image..."):
+        label, conf, dustiness, probs, overlay_img, hm_img = analyze(img)
+
+    # Result header
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
         if dustiness > 50:
-            st.error(f"**{label.upper()}** — {dustiness:.1f}% dustiness")
+            st.error(f"### 🔴 {label.upper()} — {dustiness:.1f}% dustiness")
         elif dustiness > 20:
-            st.warning(f"**{label.upper()}** — {dustiness:.1f}% dustiness")
+            st.warning(f"### 🟡 {label.upper()} — {dustiness:.1f}% dustiness")
         else:
-            st.success(f"**{label.upper()}** — {dustiness:.1f}% dustiness")
+            st.success(f"### 🟢 {label.upper()} — {dustiness:.1f}% dustiness")
+    with col_b:
         st.metric("Confidence", f"{conf*100:.1f}%")
-        st.markdown("**Class probabilities**")
-        for i, lbl in enumerate(["clean", "dirty"]):
-            st.progress(probs[i], text=f"{lbl}: {probs[i]*100:.1f}%")
+
+    # Class probabilities
+    st.markdown("**Class probabilities**")
+    prob_cols = st.columns(2)
+    for i, lbl in enumerate(["clean", "dirty"]):
+        prob_cols[i].progress(probs[i], text=f"{lbl}: {probs[i]*100:.1f}%")
+
     st.divider()
-    with st.spinner("Generating Grad-CAM heatmap..."):
-        heatmap = gradcam(img)
-    st.subheader("Grad-CAM Localization")
-    st.caption("Highlights regions most influential to the SVM decision.")
-    c3, c4 = st.columns(2)
-    with c3:
-        st.image(heatmap, caption="Heatmap overlay", use_container_width=True)
-    with c4:
-        st.image(img, caption="Original", use_container_width=True)
+
+    # Grad-CAM section
+    st.subheader("🔍 Explainable AI — Grad-CAM")
+    st.caption("Red/yellow regions are where the model looks to decide 'dirty'. Blue regions are considered clean.")
+
+    cam_col1, cam_col2 = st.columns(2)
+    with cam_col1:
+        st.image(overlay_img, caption="Grad-CAM overlay on original", use_container_width=True)
+    with cam_col2:
+        st.image(hm_img, caption="Raw heatmap (red = dusty evidence)", use_container_width=True)
+
 else:
     st.info("Upload a solar panel image to get started.")
     st.markdown("---")
-    st.markdown("**How it works:** Frozen EfficientNet-B2 → 1,408-d GAP features → RBF-SVM → Grad-CAM explainability.")
+    st.markdown("**How it works:**")
+    st.markdown("""
+    1. **Feature extraction** — Frozen EfficientNet-B2 (ImageNet) → 1,408-d GAP vector
+    2. **Classification** — RBF-SVM classifies clean vs dirty
+    3. **Explainability** — Grad-CAM highlights the regions driving the decision
+    """)
     st.markdown("**External validation:** 98.24% (2,562 imgs) / 99.74% (383 imgs) on two independent datasets.")
