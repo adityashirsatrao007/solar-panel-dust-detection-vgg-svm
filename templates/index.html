@@ -33,9 +33,19 @@
         <div class="upload-section">
             <form id="uploadForm" enctype="multipart/form-data">
                 <div class="upload-box" id="dropArea" role="button" aria-label="Upload or drag and drop an image">
-                    <i class="fas fa-cloud-upload-alt fa-3x mb-3"></i>
-                    <h3>Drag & Drop or Click to Upload 📸</h3>
-                    <p>Supported formats: PNG, JPG, JPEG</p>
+                    <i class="fas fa-cloud-upload-alt fa-3x mb-3" id="uploadIcon"></i>
+                    <h3 id="uploadTitle">Drag & Drop or Click to Upload 📸</h3>
+                    <p id="uploadHint">Supported formats: PNG, JPG, JPEG</p>
+                    <div class="upload-preview" id="uploadPreview" style="display: none;">
+                        <img id="previewThumb" src="" alt="Selected image preview">
+                        <div class="upload-file-info">
+                            <i class="fas fa-check-circle"></i>
+                            <span id="fileName">image.jpg</span>
+                        </div>
+                        <button type="button" class="upload-remove" id="removeBtn" aria-label="Remove selected image">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
                     <input type="file" id="fileInput" name="file" accept=".png,.jpg,.jpeg" style="display: none;">
                 </div>
                 <button type="submit" class="btn" id="analyzeBtn" data-tooltip="Start analyzing the uploaded image">
@@ -159,13 +169,50 @@
                 tipElement.textContent = tips[Math.floor(Math.random() * tips.length)];
             }
 
-            // Client-side file validation
-            fileInput.addEventListener('change', () => {
+            // Client-side file validation + immediate preview
+            const MAX_FILE_SIZE = 16 * 1024 * 1024; // 16MB (matches server limit)
+            
+            function showSelectedPreview() {
                 const file = fileInput.files[0];
-                if (file && file.size > 8 * 1024 * 1024) {
-                    showError('File size must be less than 8MB 📏');
+                if (!file) return;
+                
+                if (file.size > MAX_FILE_SIZE) {
+                    showError('File size must be less than 16MB 📏');
                     fileInput.value = '';
+                    return;
                 }
+                
+                const validTypes = ['image/png', 'image/jpeg', 'image/jpg'];
+                if (!validTypes.includes(file.type)) {
+                    showError('Only PNG, JPG, or JPEG files are allowed 📁');
+                    fileInput.value = '';
+                    return;
+                }
+                
+                // Show immediate preview
+                const previewThumb = document.getElementById('previewThumb');
+                const uploadPreview = document.getElementById('uploadPreview');
+                const fileName = document.getElementById('fileName');
+                const dropArea = document.getElementById('dropArea');
+                
+                previewThumb.src = URL.createObjectURL(file);
+                fileName.textContent = file.name;
+                uploadPreview.style.display = 'flex';
+                dropArea.classList.add('has-file');
+                
+                // Hide any previous error
+                document.getElementById('errorAlert').style.display = 'none';
+            }
+            
+            fileInput.addEventListener('change', showSelectedPreview);
+            
+            // Remove button handler
+            document.getElementById('removeBtn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                fileInput.value = '';
+                document.getElementById('uploadPreview').style.display = 'none';
+                document.getElementById('dropArea').classList.remove('has-file');
+                document.getElementById('previewThumb').src = '';
             });
 
             // Initialize charts if history exists
@@ -269,7 +316,10 @@
             function handleDrop(e) {
                 const dt = e.dataTransfer;
                 const files = dt.files;
-                if (files.length) fileInput.files = files;
+                if (files.length) {
+                    fileInput.files = files;
+                    showSelectedPreview();
+                }
             }
 
             function updateCharts(dustiness, primary, secondary) {

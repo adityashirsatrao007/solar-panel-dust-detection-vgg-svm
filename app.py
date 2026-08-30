@@ -1,224 +1,221 @@
-from flask import Flask, render_template, request, jsonify
-from werkzeug.utils import secure_filename
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import GlobalAveragePooling2D
-from tensorflow.keras.applications import VGG16
-from tensorflow.keras.preprocessing.image import img_to_array, load_img
-import joblib
-import numpy as np
+"""
+app.py - Flask dashboard + /analyze + /explain APIs for EfficientNet-B2-SVM pipeline.
+"""
+from __future__ import annotations
+
 import os
-import logging
-import base64
-import io
 import time
-import shutil
+import io
+import base64
+import logging
+from datetime import datetime
+from flask import Flask, request, jsonify, render_template, send_from_directory
+from werkzeug.utils import secure_filename
+from PIL import Image
 
-from PIL import Image as PilImage
+# Configure logging
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "app.log")
 
-import explanations
-from explanations import load_pipeline, get_extractor, gradcam, activation_ratio
+# File logging is best-effort: if we lack write access to the log directory
+# (e.g. tests run by a non-root user while the service writes logs as root),
+# fall back to stderr only so the app/tests still start.
+_handlers = [logging.StreamHandler()]
+try:
+    _handlers.append(logging.FileHandler(LOG_FILE))
+except (PermissionError, OSError):
+    pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=_handlers,
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-here')
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['EXPLAIN_FOLDER'] = 'static/explain'
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
-app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB limit
-os.makedirs(app.config['EXPLAIN_FOLDER'], exist_ok=True)
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Rate limiter
-try:
-    from flask_limiter import Limiter
-    from flask_limiter.util import get_remote_address
-    limiter = Limiter(app=app, key_func=get_remote_address,
-                      default_limits=["100 per day", "10 per minute"])
-except Exception as e:  # optional feature
-    logging.warning(f"flask-limiter unavailable: {e}")
-    limiter = None
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dust-detection-2025")
+app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "static", "uploads")
+app.config["EXPLAIN_FOLDER"] = os.path.join(os.path.dirname(__file__), "static", "explain")
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 
-def load_models():
-    """Load the VGG16 feature extractor, scaler and SVM classifier."""
-    global feature_extractor, svm_classifier, scaler, class_names
-    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(128, 128, 3))
-    feature_extractor = Model(inputs=base_model.input,
-                              outputs=GlobalAveragePooling2D()(base_model.output))
-    svm_path = os.path.join('Models', 'svm_classifier.pkl')
-    scaler_path = os.path.join('Models', 'scaler.pkl')
-    if not os.path.exists(svm_path) or not os.path.exists(scaler_path):
-        raise FileNotFoundError("Model files not found")
-    svm_classifier = joblib.load(svm_path)
-    scaler = joblib.load(scaler_path)
-    class_names = explanations.class_labels()
-    if len(class_names) != svm_classifier.classes_.size:
-        class_names = [f"class_{i}" for i in range(svm_classifier.classes_.size)]
-    logging.info(f"Models loaded (classes={class_names})")
+@app.before_request
+def log_request_info():
+    """Log incoming request details."""
+    if request.path in ("/analyze", "/explain"):
+        logger.info(f"REQUEST {request.method} {request.path} from {request.remote_addr}")
 
 
-load_models()
+@app.after_request
+def log_response_info(response):
+    """Log response status for API endpoints."""
+    if request.path in ("/analyze", "/explain", "/health"):
+        logger.info(f"RESPONSE {request.method} {request.path} -> {response.status_code}")
+    return response
+
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
+
+# Lazy-loaded globals — loaded on first request, not at startup
+_pipeline = None
+_extractor = None
+_models_loaded = False
 
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def verify_image(image_path):
+def verify_image(path):
     try:
-        with PilImage.open(image_path) as img:
-            img.verify()
+        img = Image.open(path)
+        img.verify()
         return True
     except Exception:
         return False
 
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    """Original endpoint: per-image dustiness percentage (unchanged behaviour)."""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file selected'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    if not (file and allowed_file(file.filename)):
-        return jsonify({'error': 'Allowed file types: png, jpg, jpeg'}), 400
-
-    filename = secure_filename(file.filename)
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    try:
-        start = time.time()
-        file.save(save_path)
-        if not verify_image(save_path):
-            os.remove(save_path)
-            return jsonify({'error': 'Invalid or corrupted image'}), 400
-        dustiness = predict_dustiness(save_path)
-        elapsed = round(time.time() - start, 2)
-        logging.info(f"Processed {filename} in {elapsed}s")
-        if dustiness is not None:
-            return jsonify({'success': True,
-                            'image_path': f"uploads/{filename}",
-                            'dustiness': dustiness,
-                            'confidence': round(dustiness / 100, 2),
-                            'processing_time': elapsed})
-        os.remove(save_path)
-        return jsonify({'error': 'Error processing image'}), 500
-    except Exception as e:
-        logging.error(f"Error processing file: {str(e)}")
-        if os.path.exists(save_path):
-            os.remove(save_path)
-        return jsonify({'error': 'Server error'}), 500
-    finally:
-        if os.path.exists(save_path):
-            os.remove(save_path)
+def ensure_models_loaded():
+    """Load models on first request (lazy) to avoid GPU OOM at startup."""
+    global _pipeline, _extractor, _models_loaded
+    if not _models_loaded:
+        from explanations import load_pipeline, get_extractor
+        _pipeline = load_pipeline()
+        _extractor = get_extractor()
+        _models_loaded = True
+        print("[app] Models loaded (lazy).")
 
 
-@app.route('/explain', methods=['POST'])
-def explain():
-    """
-    Explainable AI endpoint: returns dust probabilities, a Grad-CAM localization
-    overlay (base64 PNG), the activation ratio (localization metric), the predicted
-    class and a confidence-gated human-review flag.
-    """
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file selected'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    if not (file and allowed_file(file.filename)):
-        return jsonify({'error': 'Allowed file types: png, jpg, jpeg'}), 400
-
-    filename = secure_filename(file.filename)
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    exp_path = os.path.join(app.config['EXPLAIN_FOLDER'], filename)
-    try:
-        start = time.time()
-        file.save(save_path)
-        if not verify_image(save_path):
-            os.remove(save_path)
-            return jsonify({'error': 'Invalid or corrupted image'}), 400
-
-        fe = get_extractor()
-        pipeline = load_pipeline()
-        out = explanations.predict(save_path, fe)
-        probs = pipeline['svm'].predict_proba(pipeline['scaler'].transform(out['pooled'][None, :]))[0]
-        target = int(np.argmax(probs))
-
-        heatmap = gradcam(pipeline['svm'], pipeline['scaler'],
-                          out['conv'], out['pooled'], target)
-        overlay = explanations.overlay_heatmap(out['x'][0], heatmap)
-        overlay.save(exp_path)
-
-        png_bytes = io.BytesIO()
-        overlay.save(png_bytes, format='PNG')
-        b64 = base64.b64encode(png_bytes.getvalue()).decode('ascii')
-
-        result = {
-            'success': True,
-            'image_path': f"uploads/{filename}",
-            'explain_image_path': f"explain/{filename}",
-            'gradcam_base64': b64,
-            'class_names': class_names,
-            'probabilities': {class_names[i]: float(probs[i]) for i in range(len(class_names))},
-            'predicted_class': class_names[target],
-            'confidence': float(probs[target]),
-            'requires_review': bool(probs[target] < explanations.CONF_THRESHOLD),
-            'activation_ratio': activation_ratio(heatmap),
-            'processing_time': round(time.time() - start, 2),
-        }
-        # still expose dustiness for dashboard compatibility (binary case)
-        if len(class_names) == 2:
-            result['dustiness'] = round(probs[target] * 100, 2)
-            result['confidence'] = round(probs[target], 4)
-        logging.info(f"Explained {filename} -> {result['predicted_class']}")
-        return jsonify(result)
-    except Exception as e:
-        logging.error(f"Explain error: {str(e)}")
-        return jsonify({'error': 'Server error', 'detail': str(e)}), 500
-    finally:
-        if os.path.exists(save_path):
-            os.remove(save_path)
+def _b64_png(pil_image):
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def predict_dustiness(image_path):
-    try:
-        image = load_img(image_path, target_size=(128, 128))
-        image_array = img_to_array(image) / 255.0
-        image_array = np.expand_dims(image_array, axis=0)
-        features = feature_extractor.predict(image_array)
-        features = scaler.transform(features)
-        dust_prob = svm_classifier.predict_proba(features)[:, 1][0]
-        return round(dust_prob * 100, 2)
-    except Exception as e:
-        logging.error(f"Prediction error: {str(e)}")
-        return None
+    import numpy as np
+    from explanations import preprocess
+    ensure_models_loaded()  # lazy-load on first request
+    x = preprocess(image_path)
+    conv_out, pooled = _extractor.predict(x, verbose=0)
+    scaled = _pipeline["scaler"].transform(pooled)
+    proba = _pipeline["svm"].predict_proba(scaled)[0]
+    dirty_idx = list(_pipeline["svm"].classes_).index(1) if 1 in _pipeline["svm"].classes_ else -1
+    if dirty_idx >= 0:
+        dustiness = float(proba[dirty_idx] * 100)
+    else:
+        dustiness = float(proba[1] * 100) if len(proba) > 1 else 0.0
+    confidence = float(proba.max())
+    return {"dustiness": dustiness, "confidence": confidence, "proba": proba}
 
 
-@app.route('/')
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
 
-@app.route('/explain_page')
+@app.route("/explain_page")
 def explain_page():
-    return render_template('index.html', explain_mode=True)
+    return render_template("index.html", explain_mode=True)
 
 
-@app.route('/cleanup', methods=['POST'])
-def cleanup_uploads():
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["file"]
+    if f.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+    if not allowed_file(f.filename):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    filename = secure_filename(f.filename)
+    path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    f.save(path)
+
+    if not verify_image(path):
+        os.remove(path)
+        return jsonify({"error": "Invalid image file"}), 400
+
+    t0 = time.time()
+    result = predict_dustiness(path)
+    elapsed = time.time() - t0
+
+    os.remove(path)
+    return jsonify({
+        "dustiness": round(result["dustiness"], 2),
+        "confidence": round(result["confidence"], 4),
+        "processing_time": round(elapsed, 3),
+    })
+
+
+@app.route("/explain", methods=["POST"])
+def explain():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["file"]
+    if not allowed_file(f.filename):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    os.makedirs(app.config["EXPLAIN_FOLDER"], exist_ok=True)
+    filename = secure_filename(f.filename)
+    path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    f.save(path)
+
+    if not verify_image(path):
+        os.remove(path)
+        return jsonify({"error": "Invalid image file"}), 400
+
+    from explanations import explain_image
+    ensure_models_loaded()  # lazy-load before using extractor
+    t0 = time.time()
+    result = explain_image(path, extractor=_extractor)
+    elapsed = time.time() - t0
+
+    os.remove(path)
+
+    response = {
+        "probabilities": result["probabilities"],
+        "predicted_class": result["predicted_class"],
+        "confidence": round(result["confidence"], 4),
+        "requires_review": result["requires_review"],
+        "activation_ratio": round(result["activation_ratio"], 4),
+        "processing_time": round(elapsed, 3),
+    }
+
+    for method in ["gradcam", "scorecam", "ig"]:
+        key = f"{method}_overlay"
+        if key in result and hasattr(result[key], "save"):
+            response[f"{method}_base64"] = _b64_png(result[key])
+
+    return jsonify(response)
+
+
+@app.route("/health")
+def health():
+    """Simple health check endpoint."""
     try:
-        for folder in (app.config['UPLOAD_FOLDER'], app.config['EXPLAIN_FOLDER']):
-            if os.path.exists(folder):
-                shutil.rmtree(folder)
-                os.makedirs(folder, exist_ok=True)
-        logging.info("Upload/explain folders cleaned")
-        return jsonify({'success': True, 'message': 'Cleaned'}), 200
+        ensure_models_loaded()
+        return jsonify({"status": "ok", "models_loaded": _models_loaded})
     except Exception as e:
-        return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# Models loaded lazily on first request (avoids GPU OOM at startup).
+
+
+@app.route("/cleanup", methods=["POST"])
+def cleanup():
+    import shutil
+    for folder in [app.config["UPLOAD_FOLDER"], app.config["EXPLAIN_FOLDER"]]:
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
+            os.makedirs(folder)
+    return jsonify({"status": "ok"})
+
+
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=int(os.getenv("PORT", 5001)))
