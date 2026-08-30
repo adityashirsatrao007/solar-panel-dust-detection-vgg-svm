@@ -693,17 +693,23 @@ def main():
         if acc_ft > accuracy:
             print("  → Fine-tuned model is better, saving...")
             joblib.dump(svm_ft, os.path.join(args.output, "svm_classifier.pkl"))
+            # Recompute AUC from fine-tuned predictions
+            if len(CLASSES) == 2:
+                fpr_ft, tpr_ft, _ = roc_curve(test_labels, y_proba_ft[:, 1])
+                auc_ft_val = auc(fpr_ft, tpr_ft)
+            else:
+                auc_ft_val = 0
             scores_ft = {
                 "accuracy": acc_ft,
                 "f1": f1_ft,
                 "precision": precision_score(test_labels, y_pred_ft, average="weighted", zero_division=0),
                 "recall": recall_score(test_labels, y_pred_ft, average="weighted", zero_division=0),
-                "auc": auc(fpr, tpr) if len(CLASSES) == 2 else 0,
+                "auc": auc_ft_val,
                 "cv_accuracy": cv_score,
             }
             meta["scores"] = scores_ft
-            meta["version"] = version_id if "version_id" in dir() else f"v{len(versions) + 1:03d}"
-            meta["timestamp"] = timestamp if "timestamp" in dir() else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            meta["version"] = version_id
+            meta["timestamp"] = timestamp
             meta["fine_tuned"] = True
             with open(os.path.join(args.output, "pipeline_meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)

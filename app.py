@@ -8,8 +8,7 @@ import time
 import io
 import base64
 import logging
-from datetime import datetime
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template
 from werkzeug.utils import secure_filename
 from PIL import Image
 
@@ -35,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "dust-detection-2025")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(32).hex())
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "static", "uploads")
 app.config["EXPLAIN_FOLDER"] = os.path.join(os.path.dirname(__file__), "static", "explain")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
@@ -80,11 +79,15 @@ def ensure_models_loaded():
     """Load models on first request (lazy) to avoid GPU OOM at startup."""
     global _pipeline, _extractor, _models_loaded
     if not _models_loaded:
-        from explanations import load_pipeline, get_extractor
-        _pipeline = load_pipeline()
-        _extractor = get_extractor()
-        _models_loaded = True
-        print("[app] Models loaded (lazy).")
+        try:
+            from explanations import load_pipeline, get_extractor
+            _pipeline = load_pipeline()
+            _extractor = get_extractor()
+            _models_loaded = True
+            logger.info("Models loaded (lazy).")
+        except Exception as e:
+            logger.error(f"Failed to load models: {e}")
+            raise
 
 
 def _b64_png(pil_image):
@@ -107,7 +110,7 @@ def predict_dustiness(image_path):
     else:
         dustiness = float(proba[1] * 100) if len(proba) > 1 else 0.0
     confidence = float(proba.max())
-    return {"dustiness": dustiness, "confidence": confidence, "proba": proba}
+    return {"dustiness": dustiness, "confidence": confidence}
 
 
 @app.route("/")
@@ -125,30 +128,34 @@ def analyze():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
-    if f.filename == "":
+    if not f.filename:
         return jsonify({"error": "Empty filename"}), 400
     if not allowed_file(f.filename):
         return jsonify({"error": "Invalid file type"}), 400
 
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     filename = secure_filename(f.filename)
+    if not filename:
+        return jsonify({"error": "Invalid filename"}), 400
     path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
     f.save(path)
 
-    if not verify_image(path):
-        os.remove(path)
-        return jsonify({"error": "Invalid image file"}), 400
+    try:
+        if not verify_image(path):
+            return jsonify({"error": "Invalid image file"}), 400
 
-    t0 = time.time()
-    result = predict_dustiness(path)
-    elapsed = time.time() - t0
+        t0 = time.time()
+        result = predict_dustiness(path)
+        elapsed = time.time() - t0
 
-    os.remove(path)
-    return jsonify({
-        "dustiness": round(result["dustiness"], 2),
-        "confidence": round(result["confidence"], 4),
-        "processing_time": round(elapsed, 3),
-    })
+        return jsonify({
+            "dustiness": round(result["dustiness"], 2),
+            "confidence": round(float(result["confidence"]), 4),
+            "processing_time": round(elapsed, 3),
+        })
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 @app.route("/explain", methods=["POST"])
@@ -156,42 +163,46 @@ def explain():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Empty filename"}), 400
     if not allowed_file(f.filename):
         return jsonify({"error": "Invalid file type"}), 400
 
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
-    os.makedirs(app.config["EXPLAIN_FOLDER"], exist_ok=True)
     filename = secure_filename(f.filename)
+    if not filename:
+        return jsonify({"error": "Invalid filename"}), 400
     path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
     f.save(path)
 
-    if not verify_image(path):
-        os.remove(path)
-        return jsonify({"error": "Invalid image file"}), 400
+    try:
+        if not verify_image(path):
+            return jsonify({"error": "Invalid image file"}), 400
 
-    from explanations import explain_image
-    ensure_models_loaded()  # lazy-load before using extractor
-    t0 = time.time()
-    result = explain_image(path, extractor=_extractor)
-    elapsed = time.time() - t0
+        from explanations import explain_image
+        ensure_models_loaded()
+        t0 = time.time()
+        result = explain_image(path, extractor=_extractor)
+        elapsed = time.time() - t0
 
-    os.remove(path)
+        response = {
+            "probabilities": result["probabilities"],
+            "predicted_class": result["predicted_class"],
+            "confidence": round(float(result["confidence"]), 4),
+            "requires_review": result["requires_review"],
+            "activation_ratio": round(float(result["activation_ratio"]), 4),
+            "processing_time": round(elapsed, 3),
+        }
 
-    response = {
-        "probabilities": result["probabilities"],
-        "predicted_class": result["predicted_class"],
-        "confidence": round(result["confidence"], 4),
-        "requires_review": result["requires_review"],
-        "activation_ratio": round(result["activation_ratio"], 4),
-        "processing_time": round(elapsed, 3),
-    }
+        for method in ["gradcam", "scorecam", "ig"]:
+            key = f"{method}_overlay"
+            if key in result and hasattr(result[key], "save"):
+                response[f"{method}_base64"] = _b64_png(result[key])
 
-    for method in ["gradcam", "scorecam", "ig"]:
-        key = f"{method}_overlay"
-        if key in result and hasattr(result[key], "save"):
-            response[f"{method}_base64"] = _b64_png(result[key])
-
-    return jsonify(response)
+        return jsonify(response)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 @app.route("/health")
@@ -199,8 +210,13 @@ def health():
     """Simple health check endpoint."""
     try:
         ensure_models_loaded()
-        return jsonify({"status": "ok", "models_loaded": _models_loaded})
+        return jsonify({
+            "status": "ok",
+            "models_loaded": _models_loaded,
+            "svm_classes": [int(c) for c in _pipeline["svm"].classes_] if _pipeline else [],
+        })
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -210,11 +226,14 @@ def health():
 @app.route("/cleanup", methods=["POST"])
 def cleanup():
     import shutil
+    removed = 0
     for folder in [app.config["UPLOAD_FOLDER"], app.config["EXPLAIN_FOLDER"]]:
         if os.path.isdir(folder):
             shutil.rmtree(folder)
             os.makedirs(folder)
-    return jsonify({"status": "ok"})
+            removed += 1
+    logger.info(f"Cleanup: removed {removed} folder(s)")
+    return jsonify({"status": "ok", "folders_cleaned": removed})
 
 
 if __name__ == "__main__":

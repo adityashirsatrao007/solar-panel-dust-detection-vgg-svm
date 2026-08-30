@@ -34,13 +34,16 @@ CONF_THRESHOLD = 0.85
 DEFAULT_LABELS = ["clean", "dirty"]
 FEATURE_DIM = 1408
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(ROOT, "Models")
+
 
 def _to_list(x) -> list:
     return x.tolist() if hasattr(x, "tolist") else list(x)
 
 
 def class_labels() -> list[str]:
-    path = os.path.join("Models", "class_names.json")
+    path = os.path.join(MODELS_DIR, "class_names.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
@@ -48,8 +51,8 @@ def class_labels() -> list[str]:
 
 
 def load_pipeline() -> dict:
-    svm = joblib.load(os.path.join("Models", "svm_classifier.pkl"))
-    scaler = joblib.load(os.path.join("Models", "scaler.pkl"))
+    svm = joblib.load(os.path.join(MODELS_DIR, "svm_classifier.pkl"))
+    scaler = joblib.load(os.path.join(MODELS_DIR, "scaler.pkl"))
     labels = class_labels()
     if len(labels) != svm.classes_.size:
         labels = [f"class_{i}" for i in range(svm.classes_.size)]
@@ -145,36 +148,37 @@ def gradcam(svm, scaler, conv, pooled, target_idx):
 
 
 # ---------------------------------------------------------------------------
-# 2. Score-CAM (gradient-free)
+# 2. Score-CAM (gradient-free) — fallback to Grad-CAM for non-linear SVM
 # ---------------------------------------------------------------------------
 
-def scorecam(svm, scaler, conv, pooled, target_idx, n_steps=32):
-    """Score-CAM: mask activations, measure impact on SVM decision score."""
+def scorecam(svm, scaler, conv, pooled, target_idx, input_image=None, n_steps=32):
+    """Score-CAM: mask activations, measure impact on SVM decision score.
+
+    For non-linear (RBF) SVM, falls back to Grad-CAM since Score-CAM requires
+    a linear decision boundary for meaningful channel scoring.
+    """
+    if svm.kernel != "linear":
+        return gradcam(svm, scaler, conv, pooled, target_idx)
+
     n_channels = conv.shape[-1]
-    # Get decision score for target class
     z = scaler.transform(pooled.reshape(1, -1))
-    if svm.kernel == "linear":
-        coef = svm.coef_[0]
-        sign = 1.0 if _to_list(svm.classes_)[target_idx] == 1 else -1.0
-    else:
-        # Fallback to probability-based scoring
-        proba = svm.predict_proba(z)[0]
+    coef = svm.coef_[0]
+    sign = 1.0 if _to_list(svm.classes_)[target_idx] == 1 else -1.0
+
+    if input_image is None:
         return gradcam(svm, scaler, conv, pooled, target_idx)
 
     scores = np.zeros(n_channels)
     for c in range(n_channels):
         act = conv[:, :, c]
         act_norm = (act - act.min()) / (act.max() - act.min() + 1e-8)
-        # Upsample to input size
         mask = tf.image.resize(act_norm[..., None], (IMG_SIZE, IMG_SIZE),
                                method="bilinear").numpy()[:, :, :, 0]
-        # Apply mask to input
-        masked_input = _last_input.copy() * mask[..., None]
+        masked_input = input_image.copy() * mask[..., None]
         _, masked_pooled = get_extractor().predict(masked_input, verbose=0)
         z_masked = scaler.transform(masked_pooled)
         scores[c] = sign * (coef * z_masked.ravel()).sum()
 
-    # Weight conv channels by scores
     weights = scores / (scores.max() + 1e-8)
     heatmap = np.maximum(np.tensordot(weights, conv, axes=(0, 2)), 0.0)
     hmax = heatmap.max()
@@ -183,7 +187,7 @@ def scorecam(svm, scaler, conv, pooled, target_idx, n_steps=32):
     return heatmap
 
 
-_last_input = None  # Set by explain_image
+_last_input = None  # Kept for backward compatibility
 
 
 # ---------------------------------------------------------------------------
