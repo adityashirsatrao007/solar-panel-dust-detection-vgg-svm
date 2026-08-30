@@ -77,9 +77,11 @@ def gradcam_overlay(conv, grad, img_size):
 
 
 # ── Grounding DINO detection ───────────────────────────────────────────────
-def detect_dust(image, threshold=0.25):
+BOX_COLORS = ["red", "orange", "#FFD700", "cyan", "magenta", "lime", "#FF69B4", "#00BFFF"]
+
+def detect_dust(image, threshold=0.15):
     proc, mdl = load_grounding_dino()
-    text = "dust. dirt. debris. soiling. dirty area."
+    text = "bird dropping. mud stain. leaf debris. dirt patch. dust spot."
     inputs = proc(images=image, text=text, return_tensors="pt")
     with torch.no_grad():
         outputs = mdl(**inputs)
@@ -115,26 +117,40 @@ def detect_dust(image, threshold=0.25):
     labels = []
     for lid in labels_raw:
         best = min(phrase_map.keys(), key=lambda k: abs(k - lid), default=None)
-        labels.append(phrase_map.get(best, f"class_{lid}"))
+        labels.append(phrase_map.get(best, f"dust {lid}"))
 
-    return scores, boxes, labels
+    # Filter: keep only boxes smaller than 50% of image area
+    img_w, img_h = image.size
+    img_area = img_w * img_h
+    keep = []
+    for i in range(len(scores)):
+        x1, y1, x2, y2 = boxes[i]
+        box_area = (x2 - x1) * (y2 - y1)
+        if box_area < 0.5 * img_area:
+            keep.append(i)
+
+    if not keep:
+        keep = list(range(len(scores)))
+
+    return scores[keep], boxes[keep], [labels[i] for i in keep]
 
 
-def draw_boxes(image, scores, boxes, labels, color="red", width=3):
+def draw_boxes(image, scores, boxes, labels, width=3):
     draw_img = image.copy()
     draw = ImageDraw.Draw(draw_img)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
     except OSError:
         font = ImageFont.load_default()
 
-    for score, box, label in zip(scores, boxes, labels):
+    for i, (score, box, label) in enumerate(zip(scores, boxes, labels)):
         x1, y1, x2, y2 = box.astype(int)
+        color = BOX_COLORS[i % len(BOX_COLORS)]
         draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
         text = f"{label} {score:.0%}"
-        bbox = draw.textbbox((x1, y1 - 25), text, font=font)
-        draw.rectangle(bbox, fill=color)
-        draw.text((x1, y1 - 25), text, fill="white", font=font)
+        tw, th = draw.textbbox((0, 0), text, font=font)[2:4]
+        draw.rectangle([x1, y1 - th - 6, x1 + tw + 4, y1], fill=color)
+        draw.text((x1 + 2, y1 - th - 4), text, fill="black", font=font)
 
     return draw_img
 
@@ -169,11 +185,12 @@ def analyze(image: Image.Image):
 
     grad_overlay, grad_heatmap = gradcam_overlay(conv, grad, image.convert("RGB").size)
 
-    # Grounding DINO bounding boxes
+    # Grounding DINO bounding boxes (small dirty spots only)
     det_scores, det_boxes, det_labels = detect_dust(image.convert("RGB"))
     boxed_img = draw_boxes(image.convert("RGB"), det_scores, det_boxes, det_labels)
+    n_spots = len(det_scores)
 
-    return label, conf, dustiness, probs, grad_overlay, grad_heatmap, boxed_img, len(det_scores)
+    return label, conf, dustiness, probs, grad_overlay, grad_heatmap, boxed_img, n_spots
 
 
 # ── UI ──────────────────────────────────────────────────────────────────────
@@ -214,8 +231,8 @@ uploaded = st.file_uploader("Upload a solar panel image", type=["jpg", "jpeg", "
 if uploaded:
     img = Image.open(uploaded)
 
-    with st.spinner("Running EfficientNet-B2 + SVM classification..."):
-        label, conf, dustiness, probs, grad_overlay, grad_heatmap, boxed_img, n_dets = analyze(img)
+    with st.spinner("Running analysis..."):
+        label, conf, dustiness, probs, grad_overlay, grad_heatmap, boxed_img, n_spots = analyze(img)
 
     # Result header
     col_a, col_b = st.columns([1, 1])
@@ -248,9 +265,12 @@ if uploaded:
     st.divider()
 
     # Bounding boxes
-    st.subheader("📦 Bounding Boxes — Zero-shot dust localization")
-    st.caption(f"Grounding DINO detected **{n_dets}** dusty region(s) via text prompts (dust, dirt, debris, soiling).")
-    st.image(boxed_img, caption="Grounding DINO bounding boxes", use_container_width=True)
+    st.subheader("📦 Bounding Boxes — Dust localization")
+    if n_spots > 0:
+        st.caption(f"Grounding DINO found **{n_spots}** dirty spot(s) (bird droppings, mud, debris, dust patches).")
+        st.image(boxed_img, caption="Grounding DINO bounding boxes", use_container_width=True)
+    else:
+        st.success("No dirty spots detected — panel appears clean.")
 
 else:
     st.info("Upload a solar panel image to get started.")
