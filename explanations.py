@@ -241,8 +241,18 @@ def shap_top_channels(features, svm, scaler, nsamples=64, max_display=15, seed=7
         explainer = shap.KernelExplainer(svm.predict_proba, zs[: min(len(zs), 50)])
         phi = np.asarray(explainer.shap_values(zs)[: min(len(zs), nsamples)])
         if phi.ndim != 2:
-            cl = int(np.argmax(svm.predict(zs[: min(len(zs), nsamples)]), axis=1))
-            phi = np.asarray(phi)[cl]
+            # shap may return (samples, features, classes) or (classes, samples,
+            # features); keep each sample's predicted class and end up with a
+            # plain (samples, features) matrix for the channel ranking below.
+            n = min(len(zs), nsamples)
+            preds = np.asarray(svm.predict(zs[:n])).ravel()
+            if phi.ndim == 3 and phi.shape[0] == preds.shape[0] and preds.max() < phi.shape[-1]:
+                phi = phi[np.arange(phi.shape[0]), :, preds]
+            elif phi.ndim == 3 and phi.shape[1] == preds.shape[0] and preds.max() < phi.shape[-1]:
+                phi = phi.transpose(1, 2, 0)
+                phi = phi[np.arange(phi.shape[0]), :, preds]
+            else:
+                phi = phi.reshape(phi.shape[0], -1)
 
     mean_abs = np.abs(phi).mean(axis=0)
     top_idx = np.argsort(mean_abs)[-max_display:][::-1]
