@@ -8,3 +8,4 @@ streamlit>=1.40,<1.41
 huggingface_hub>=1.5,<2.0
 torch==2.14.1
 transformers>=5.10.0,<6.0
+# Pinned to patched releases 2026-10-01: torch>=2.13.0 (CVE fixes), transformers>=5.10.0
